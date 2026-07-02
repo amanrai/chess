@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PGN move visualizer</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+  <style>
+    :root {
+      --bg: #282C34;
+      --surface: #2F343D;
+      --sunken: #21252B;
+      --border: rgba(255,255,255,0.06);
+      --text: #ABB2BF;
+      --text-hi: #C8CDD4;
+      --muted: #7F8794;
+      --faint: #5C6370;
+      --accent: #E5C07B;
+      --accent-deep: #D19A66;
+      --focus: rgba(229, 192, 123, 0.45);
+      --btn-blue: #9DB8D6;
+      --btn-green: #A6C796;
+      --btn-orange: #E0B080;
+      --text-on-btn: #21252B;
+      --radius: 2px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+    }
+    .app { display: grid; grid-template-columns: 360px 1fr 340px; height: 100vh; overflow: hidden; }
+    aside, main { border-right: 1px solid var(--border); }
+    aside, .details { background: var(--surface); padding: 18px; overflow: auto; min-height: 0; }
+    main { display: grid; place-items: center; padding: 28px; overflow: hidden; min-height: 0; }
+    h1 { margin: 0 0 6px; color: var(--text-hi); font-size: 18px; letter-spacing: -0.02em; font-weight: 650; }
+    .sub { color: var(--muted); font-size: 13px; line-height: 1.45; margin-bottom: 16px; }
+    label { display: block; color: var(--muted); font-size: 12px; margin: 14px 0 6px; }
+    input[type="file"], textarea {
+      width: 100%;
+      background: var(--sunken);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px;
+      outline: none;
+    }
+    textarea { min-height: 260px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.45; }
+    input:focus, textarea:focus, button:focus { box-shadow: 0 0 0 3px var(--focus); }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    button {
+      border: 1px solid transparent;
+      border-radius: var(--radius);
+      padding: 8px 10px;
+      font-weight: 500;
+      color: var(--text-on-btn);
+      background: var(--btn-blue);
+      cursor: pointer;
+    }
+    button.secondary { background: transparent; color: var(--text); border-color: var(--border); }
+    button.good { background: var(--btn-green); }
+    button.warn { background: var(--btn-orange); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .status { margin-top: 12px; color: var(--muted); font-size: 12px; min-height: 18px; }
+    .board-wrap { width: min(76vh, 76vw, 720px); }
+    .board {
+      display: grid;
+      grid-template-columns: repeat(8, 1fr);
+      width: 100%;
+      aspect-ratio: 1;
+      border: 1px solid var(--border);
+      background: var(--sunken);
+    }
+    .sq { position: relative; display: grid; place-items: center; font-size: clamp(28px, 6vw, 62px); line-height: 1; user-select: none; }
+    .light { background: #3B404A; }
+    .dark { background: #252A32; }
+    .sq.last { box-shadow: inset 0 0 0 3px rgba(229,192,123,0.75); }
+    .coord { position: absolute; left: 5px; top: 4px; color: rgba(171,178,191,0.45); font-size: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .caption { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; color: var(--muted); }
+    .move-now { color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .meta { border: 1px solid var(--border); background: var(--sunken); padding: 10px; margin-bottom: 14px; }
+    .meta div { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border); padding: 5px 0; }
+    .meta div:last-child { border-bottom: 0; }
+    .meta b { color: var(--muted); font-weight: 500; }
+    .moves { display: grid; grid-template-columns: 42px 1fr 1fr; gap: 1px; background: var(--border); border: 1px solid var(--border); }
+    .moves div { background: var(--surface); padding: 6px 8px; min-height: 30px; }
+    .moves .num { color: var(--faint); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .moves .active { color: var(--text-on-btn); background: var(--accent); }
+    @media (max-width: 1100px) { .app { grid-template-columns: 320px 1fr; } .details { grid-column: 1 / -1; max-height: 360px; } }
+    @media (max-width: 760px) { .app { display: block; height: auto; overflow: visible; } main { padding: 16px; } .board-wrap { width: 100%; } }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside>
+      <h1>PGN move visualizer</h1>
+      <div class="sub">Load or paste one PGN game. If you choose a huge split file, this reads only the first game so the browser stays responsive.</div>
+
+      <label for="file">PGN file</label>
+      <input id="file" type="file" accept=".pgn,.txt" />
+
+      <label for="pgn">PGN text</label>
+      <textarea id="pgn" spellcheck="false" placeholder="Paste one PGN game here..."></textarea>
+
+      <div class="row" style="margin-top: 10px;">
+        <button class="good" id="load">Load game</button>
+        <button class="secondary" id="flip">Flip board</button>
+      </div>
+
+      <label>Step through</label>
+      <div class="row">
+        <button class="secondary" id="start">Start</button>
+        <button class="secondary" id="prev">Prev</button>
+        <button id="next">Next</button>
+        <button class="secondary" id="end">End</button>
+      </div>
+      <div class="status" id="status">Waiting for a game.</div>
+    </aside>
+
+    <main>
+      <div class="board-wrap">
+        <div class="board" id="board"></div>
+        <div class="caption">
+          <span id="ply">Ply 0 / 0</span>
+          <span class="move-now" id="moveNow">starting position</span>
+        </div>
+      </div>
+    </main>
+
+    <section class="details">
+      <h1>Game details</h1>
+      <div class="meta" id="meta"></div>
+      <h1>Moves</h1>
+      <div class="moves" id="moves"></div>
+    </section>
+  </div>
+
+  <script>
+    const pieceMap = { p:'♟', r:'♜', n:'♞', b:'♝', q:'♛', k:'♚', P:'♙', R:'♖', N:'♘', B:'♗', Q:'♕', K:'♔' };
+    const boardEl = document.getElementById('board');
+    const pgnEl = document.getElementById('pgn');
+    const statusEl = document.getElementById('status');
+    const metaEl = document.getElementById('meta');
+    const movesEl = document.getElementById('moves');
+    const plyEl = document.getElementById('ply');
+    const moveNowEl = document.getElementById('moveNow');
+
+    let game = new Chess();
+    let moves = [];
+    let headers = {};
+    let ply = 0;
+    let flipped = false;
+    let lastMove = null;
+
+    function firstGameFromText(text) {
+      const lines = text.replace(/\r\n/g, '\n').split('\n');
+      let started = false, seenMoves = false, out = [];
+      for (const line of lines) {
+        if (line.startsWith('[Event ') && started && seenMoves) break;
+        if (line.startsWith('[Event ')) started = true;
+        if (started) out.push(line);
+        if (started && line.trim() && !line.startsWith('[')) seenMoves = true;
+      }
+      return out.join('\n').trim();
+    }
+
+    function parseHeaders(text) {
+      const h = {};
+      for (const line of text.split('\n')) {
+        const m = line.match(/^\[([^\s]+)\s+"(.*)"\]$/);
+        if (m) h[m[1]] = m[2];
+      }
+      return h;
+    }
+
+    function loadGame() {
+      const text = firstGameFromText(pgnEl.value);
+      const g = new Chess();
+      const ok = g.load_pgn(text, { sloppy: true });
+      if (!ok) {
+        statusEl.textContent = 'Could not parse PGN. Try a single game in standard PGN/SAN.';
+        return;
+      }
+      game = new Chess();
+      headers = parseHeaders(text);
+      moves = g.history({ verbose: true });
+      ply = 0;
+      lastMove = null;
+      renderAll();
+      statusEl.textContent = `Loaded ${moves.length} plies.`;
+    }
+
+    function setPly(target) {
+      ply = Math.max(0, Math.min(target, moves.length));
+      game.reset();
+      lastMove = null;
+      for (let i = 0; i < ply; i++) lastMove = game.move(moves[i].san, { sloppy: true });
+      renderAll();
+    }
+
+    function renderBoard() {
+      boardEl.innerHTML = '';
+      const b = game.board();
+      const ranks = flipped ? [...Array(8).keys()] : [...Array(8).keys()].reverse();
+      const files = flipped ? [...Array(8).keys()].reverse() : [...Array(8).keys()];
+      for (const r of ranks) {
+        for (const f of files) {
+          const sq = document.createElement('div');
+          const fileChar = 'abcdefgh'[f];
+          const rankChar = String(r + 1);
+          const name = fileChar + rankChar;
+          sq.className = `sq ${((r + f) % 2) ? 'light' : 'dark'}`;
+          if (lastMove && (lastMove.from === name || lastMove.to === name)) sq.classList.add('last');
+          const coord = document.createElement('span');
+          coord.className = 'coord';
+          coord.textContent = name;
+          sq.appendChild(coord);
+          const piece = b[7 - r][f];
+          if (piece) sq.appendChild(document.createTextNode(pieceMap[piece.color === 'w' ? piece.type.toUpperCase() : piece.type]));
+          boardEl.appendChild(sq);
+        }
+      }
+    }
+
+    function renderMeta() {
+      const keys = ['White','WhiteElo','Black','BlackElo','Event','Site','Date','Round','Result'];
+      metaEl.innerHTML = keys.filter(k => headers[k]).map(k => `<div><b>${k}</b><span>${headers[k]}</span></div>`).join('') || '<div><b>No metadata loaded</b><span></span></div>';
+    }
+
+    function renderMoves() {
+      movesEl.innerHTML = '';
+      for (let i = 0; i < moves.length; i += 2) {
+        const num = document.createElement('div'); num.className = 'num'; num.textContent = (i / 2 + 1) + '.'; movesEl.appendChild(num);
+        for (let j = 0; j < 2; j++) {
+          const idx = i + j;
+          const cell = document.createElement('div');
+          if (idx < moves.length) {
+            cell.textContent = moves[idx].san;
+            if (idx === ply - 1) cell.className = 'active';
+            cell.onclick = () => setPly(idx + 1);
+          }
+          movesEl.appendChild(cell);
+        }
+      }
+    }
+
+    function renderAll() {
+      renderBoard(); renderMeta(); renderMoves();
+      plyEl.textContent = `Ply ${ply} / ${moves.length}`;
+      moveNowEl.textContent = ply === 0 ? 'starting position' : `${Math.ceil(ply / 2)}${ply % 2 ? '.' : '...'} ${moves[ply - 1].san}`;
+    }
+
+    document.getElementById('file').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      statusEl.textContent = `Reading first game from ${file.name}...`;
+      const text = await file.text();
+      pgnEl.value = firstGameFromText(text);
+      loadGame();
+    });
+    document.getElementById('load').onclick = loadGame;
+    document.getElementById('flip').onclick = () => { flipped = !flipped; renderBoard(); };
+    document.getElementById('start').onclick = () => setPly(0);
+    document.getElementById('prev').onclick = () => setPly(ply - 1);
+    document.getElementById('next').onclick = () => setPly(ply + 1);
+    document.getElementById('end').onclick = () => setPly(moves.length);
+    document.addEventListener('keydown', (e) => {
+      if (e.target.tagName === 'TEXTAREA') return;
+      if (e.key === 'ArrowRight') setPly(ply + 1);
+      if (e.key === 'ArrowLeft') setPly(ply - 1);
+      if (e.key === 'Home') setPly(0);
+      if (e.key === 'End') setPly(moves.length);
+    });
+    renderAll();
+  </script>
+</body>
+</html>
