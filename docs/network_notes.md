@@ -97,6 +97,18 @@ Working notes while discussing architecture. Not final.
 - Joint packet generator vs AR packet generator.
 - Question: is it better to predict the whole move packet at once or autoregress within the move?
 
+### Verifier prefix sampling
+
+- Verifier training should support bucketed prefix sampling.
+- Same game can provide many samples by choosing different prefix lengths.
+- Prefix length distribution matters:
+  - early prefixes: opening/result priors, high uncertainty
+  - mid prefixes: positional evaluation
+  - late prefixes: conversion/decisive-state recognition
+- Support absolute ply buckets and fraction-of-game buckets.
+- Training sampler should choose: bucket -> game with valid prefix -> prefix length -> crop/pad context.
+- Preprocessing can be iterated on a Tailnet/Jupyter machine before transferring compact tokenized datasets to Vast.
+
 ### State representation ablation
 
 - Pure move-history AR model.
