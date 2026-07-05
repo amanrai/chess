@@ -57,6 +57,24 @@ Converts the split PGNs into compact token arrays while preserving game boundari
 uv run python scripts/preprocess_verifier_dataset.py
 ```
 
+For faster preprocessing on a multi-core machine:
+
+```bash
+uv run python scripts/preprocess_verifier_dataset.py --workers $(nproc)
+```
+
+You can tune process-pool batching:
+
+```bash
+uv run python scripts/preprocess_verifier_dataset.py --workers $(nproc) --chunksize 128
+```
+
+The script prints progress bars and final dataset stats. Disable progress bars with:
+
+```bash
+uv run python scripts/preprocess_verifier_dataset.py --no-progress
+```
+
 Expected files:
 
 ```text
@@ -81,6 +99,16 @@ Labels:
 0 = white win
 1 = black win
 2 = draw
+```
+
+Stats written to `manifest.json` include:
+
+```text
+result counts
+game length min/max/mean/median/p10/p90
+source file counts
+skipped game counts
+workers/chunksize used
 ```
 
 ## 4. Optional: materialize sampled verifier prefixes

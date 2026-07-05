@@ -21,9 +21,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import re
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -69,6 +71,25 @@ FRACTION_PREFIX_BUCKETS = [
     PrefixBucket("late_30pct", 0.50, 0.80, 1.0),
     PrefixBucket("final_20pct", 0.80, 1.00, 1.0),
 ]
+
+_WORKER_TOKENIZER: ChessTokenizer | None = None
+
+
+def _init_worker() -> None:
+    global _WORKER_TOKENIZER
+    _WORKER_TOKENIZER = ChessTokenizer()
+
+
+def _process_game_for_store(args: tuple[str, int]) -> tuple[int | None, np.ndarray | None, str | None]:
+    game_text, seq_len = args
+    tokenizer = _WORKER_TOKENIZER or ChessTokenizer()
+    result = result_from_pgn_text(game_text)
+    if result not in RESULT_TO_LABEL:
+        return None, None, "unknown_result"
+    packets = pgn_game_to_packets(game_text, tokenizer, seq_len)
+    if packets is None or len(packets) < 2:
+        return None, None, "empty_or_bad_game"
+    return RESULT_TO_LABEL[result], packets, None
 
 
 def count_pgn_games(path: Path) -> int:
@@ -123,7 +144,15 @@ def pgn_game_to_packets(game_text: str, tokenizer: ChessTokenizer, seq_len: int)
     return np.asarray(rows, dtype=np.uint16)
 
 
-def write_game_store(inputs: list[Path], out_dir: Path, seq_len: int, max_games: int = 0, progress: bool = True) -> dict:
+def write_game_store(
+    inputs: list[Path],
+    out_dir: Path,
+    seq_len: int,
+    max_games: int = 0,
+    progress: bool = True,
+    workers: int = 1,
+    chunksize: int = 64,
+) -> dict:
     tokenizer = ChessTokenizer()
     all_moves: list[np.ndarray] = []
     offsets = [0]
@@ -131,31 +160,44 @@ def write_game_store(inputs: list[Path], out_dir: Path, seq_len: int, max_games:
     source_files: list[str] = []
     skipped = {"unknown_result": 0, "empty_or_bad_game": 0}
 
+    def handle_processed(label: int | None, packets: np.ndarray | None, skipped_reason: str | None, path: Path) -> None:
+        if skipped_reason:
+            skipped[skipped_reason] += 1
+            return
+        assert label is not None
+        assert packets is not None
+        all_moves.append(packets)
+        results.append(label)
+        source_files.append(str(path))
+        offsets.append(offsets[-1] + len(packets))
+
     for path in inputs:
         total_games = count_pgn_games(path) if progress else None
         if max_games:
             remaining = max(max_games - len(results), 0)
             total_games = min(total_games or remaining, remaining)
         desc = f"tokenizing {path.name}"
-        game_iter = tqdm(iter_pgn_games(path), total=total_games, desc=desc, unit="game", disable=not progress)
-        for game_text in game_iter:
-            if max_games and len(results) >= max_games:
-                break
-            result = result_from_pgn_text(game_text)
-            if result not in RESULT_TO_LABEL:
-                skipped["unknown_result"] += 1
+
+        if workers <= 1:
+            game_iter = tqdm(iter_pgn_games(path), total=total_games, desc=desc, unit="game", disable=not progress)
+            for game_text in game_iter:
+                if max_games and len(results) >= max_games:
+                    break
+                label, packets, skipped_reason = _process_game_for_store((game_text, seq_len))
+                handle_processed(label, packets, skipped_reason, path)
                 game_iter.set_postfix(games=len(results), moves=offsets[-1], skipped=sum(skipped.values()))
-                continue
-            packets = pgn_game_to_packets(game_text, tokenizer, seq_len)
-            if packets is None or len(packets) < 2:
-                skipped["empty_or_bad_game"] += 1
-                game_iter.set_postfix(games=len(results), moves=offsets[-1], skipped=sum(skipped.values()))
-                continue
-            all_moves.append(packets)
-            results.append(RESULT_TO_LABEL[result])
-            source_files.append(str(path))
-            offsets.append(offsets[-1] + len(packets))
-            game_iter.set_postfix(games=len(results), moves=offsets[-1], skipped=sum(skipped.values()))
+        else:
+            if progress:
+                print(f"using {workers} worker processes, chunksize={chunksize}")
+            game_args = ((game_text, seq_len) for game_text in iter_pgn_games(path))
+            with ProcessPoolExecutor(max_workers=workers, initializer=_init_worker) as pool:
+                mapped = pool.map(_process_game_for_store, game_args, chunksize=chunksize)
+                game_iter = tqdm(mapped, total=total_games, desc=desc, unit="game", disable=not progress)
+                for label, packets, skipped_reason in game_iter:
+                    if max_games and len(results) >= max_games:
+                        break
+                    handle_processed(label, packets, skipped_reason, path)
+                    game_iter.set_postfix(games=len(results), moves=offsets[-1], skipped=sum(skipped.values()))
         if max_games and len(results) >= max_games:
             break
 
@@ -165,8 +207,21 @@ def write_game_store(inputs: list[Path], out_dir: Path, seq_len: int, max_games:
     moves = np.concatenate(all_moves, axis=0) if all_moves else np.empty((0, seq_len), dtype=np.uint16)
     offsets_arr = np.asarray(offsets, dtype=np.int64)
     results_arr = np.asarray(results, dtype=np.int64)
+    game_lengths = np.diff(offsets_arr) if len(offsets_arr) > 1 else np.asarray([], dtype=np.int64)
+    result_counts = {LABEL_TO_RESULT[i]: int((results_arr == i).sum()) for i in sorted(LABEL_TO_RESULT)}
+    source_counts = {str(path): source_files.count(str(path)) for path in inputs}
+    length_stats = {
+        "min": int(game_lengths.min()) if len(game_lengths) else 0,
+        "max": int(game_lengths.max()) if len(game_lengths) else 0,
+        "mean": float(game_lengths.mean()) if len(game_lengths) else 0.0,
+        "median": float(np.median(game_lengths)) if len(game_lengths) else 0.0,
+        "p10": float(np.percentile(game_lengths, 10)) if len(game_lengths) else 0.0,
+        "p90": float(np.percentile(game_lengths, 90)) if len(game_lengths) else 0.0,
+    }
 
     if progress:
+        print("dataset stats:")
+        print(json.dumps({"result_counts": result_counts, "game_length_moves": length_stats, "source_counts": source_counts}, indent=2))
         print(f"writing arrays to {out_dir}")
     np.save(out_dir / "moves.npy", moves)
     np.save(out_dir / "offsets.npy", offsets_arr)
@@ -193,6 +248,13 @@ def write_game_store(inputs: list[Path], out_dir: Path, seq_len: int, max_games:
         "vocab_size": len(VOCAB),
         "vocab": VOCAB,
         "skipped": skipped,
+        "workers": workers,
+        "chunksize": chunksize,
+        "stats": {
+            "result_counts": result_counts,
+            "source_counts": source_counts,
+            "game_length_moves": length_stats,
+        },
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     (out_dir / "sources.json").write_text(json.dumps(source_files, indent=2) + "\n", encoding="utf-8")
@@ -256,6 +318,8 @@ def materialize_prefix_examples(
     n = len(results) * prefixes_per_game
     x = np.lib.format.open_memmap(out_dir / "prefix_x.npy", mode="w+", dtype=np.uint16, shape=(n, context_moves, seq_len))
     y = np.lib.format.open_memmap(out_dir / "prefix_y.npy", mode="w+", dtype=np.int64, shape=(n,))
+    bucket_counts: dict[str, int] = {}
+    prefix_lengths: list[int] = []
     meta_path = out_dir / "prefix_meta.jsonl"
 
     row = 0
@@ -278,6 +342,8 @@ def materialize_prefix_examples(
                 x[row] = arr
                 y[row] = int(label)
                 meta.write(json.dumps({"row": row, "game_i": game_i, "prefix_len": t, "bucket": bucket_name, "label": int(label)}) + "\n")
+                bucket_counts[bucket_name] = bucket_counts.get(bucket_name, 0) + 1
+                prefix_lengths.append(int(t))
                 row += 1
             game_iter.set_postfix(rows=row)
 
@@ -285,6 +351,22 @@ def materialize_prefix_examples(
         print(f"flushing prefix arrays: {n:,} examples")
     x.flush()
     y.flush()
+    prefix_length_arr = np.asarray(prefix_lengths, dtype=np.int64)
+    prefix_stats = {
+        "bucket_counts": bucket_counts,
+        "prefix_length_moves": {
+            "min": int(prefix_length_arr.min()) if len(prefix_length_arr) else 0,
+            "max": int(prefix_length_arr.max()) if len(prefix_length_arr) else 0,
+            "mean": float(prefix_length_arr.mean()) if len(prefix_length_arr) else 0.0,
+            "median": float(np.median(prefix_length_arr)) if len(prefix_length_arr) else 0.0,
+            "p10": float(np.percentile(prefix_length_arr, 10)) if len(prefix_length_arr) else 0.0,
+            "p90": float(np.percentile(prefix_length_arr, 90)) if len(prefix_length_arr) else 0.0,
+        },
+    }
+    if progress:
+        print("prefix stats:")
+        print(json.dumps(prefix_stats, indent=2))
+
     prefix_manifest = {
         "kind": "materialized_verifier_prefixes",
         "prefix_x_path": str(out_dir / "prefix_x.npy"),
@@ -296,6 +378,7 @@ def materialize_prefix_examples(
         "prefixes_per_game": prefixes_per_game,
         "bucket_mode": mode,
         "seed": seed,
+        "stats": prefix_stats,
     }
     (out_dir / "prefix_manifest.json").write_text(json.dumps(prefix_manifest, indent=2) + "\n", encoding="utf-8")
     return prefix_manifest
@@ -312,6 +395,8 @@ def main() -> int:
     parser.add_argument("--prefixes-per-game", type=int, default=1)
     parser.add_argument("--bucket-mode", choices=["fraction", "absolute"], default="fraction")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--workers", type=int, default=1, help="Game-tokenization worker processes; use e.g. --workers $(nproc)")
+    parser.add_argument("--chunksize", type=int, default=64, help="ProcessPool map chunksize for --workers > 1")
     parser.add_argument("--no-progress", action="store_true", help="Disable tqdm progress bars")
     args = parser.parse_args()
 
@@ -320,7 +405,18 @@ def main() -> int:
         raise SystemExit("Missing input(s): " + ", ".join(str(p) for p in missing))
 
     progress = not args.no_progress
-    manifest = write_game_store(args.inputs, args.out_dir, args.seq_len, args.max_games, progress=progress)
+    workers = max(1, args.workers)
+    if workers > (os.cpu_count() or workers) and progress:
+        print(f"warning: workers={workers} exceeds detected cpu_count={os.cpu_count()}")
+    manifest = write_game_store(
+        args.inputs,
+        args.out_dir,
+        args.seq_len,
+        args.max_games,
+        progress=progress,
+        workers=workers,
+        chunksize=args.chunksize,
+    )
     print(json.dumps({k: manifest[k] for k in ["num_games", "total_moves", "moves_shape", "skipped"]}, indent=2))
 
     if args.materialize_prefixes:
