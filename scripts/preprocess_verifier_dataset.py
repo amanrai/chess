@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Literal
 
 import numpy as np
+from tqdm.auto import tqdm
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -68,6 +69,15 @@ FRACTION_PREFIX_BUCKETS = [
     PrefixBucket("late_30pct", 0.50, 0.80, 1.0),
     PrefixBucket("final_20pct", 0.80, 1.00, 1.0),
 ]
+
+
+def count_pgn_games(path: Path) -> int:
+    count = 0
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if line.startswith("[Event "):
+                count += 1
+    return count
 
 
 def iter_pgn_games(path: Path):
@@ -113,7 +123,7 @@ def pgn_game_to_packets(game_text: str, tokenizer: ChessTokenizer, seq_len: int)
     return np.asarray(rows, dtype=np.uint16)
 
 
-def write_game_store(inputs: list[Path], out_dir: Path, seq_len: int, max_games: int = 0) -> dict:
+def write_game_store(inputs: list[Path], out_dir: Path, seq_len: int, max_games: int = 0, progress: bool = True) -> dict:
     tokenizer = ChessTokenizer()
     all_moves: list[np.ndarray] = []
     offsets = [0]
@@ -122,29 +132,42 @@ def write_game_store(inputs: list[Path], out_dir: Path, seq_len: int, max_games:
     skipped = {"unknown_result": 0, "empty_or_bad_game": 0}
 
     for path in inputs:
-        for game_text in iter_pgn_games(path):
+        total_games = count_pgn_games(path) if progress else None
+        if max_games:
+            remaining = max(max_games - len(results), 0)
+            total_games = min(total_games or remaining, remaining)
+        desc = f"tokenizing {path.name}"
+        game_iter = tqdm(iter_pgn_games(path), total=total_games, desc=desc, unit="game", disable=not progress)
+        for game_text in game_iter:
             if max_games and len(results) >= max_games:
                 break
             result = result_from_pgn_text(game_text)
             if result not in RESULT_TO_LABEL:
                 skipped["unknown_result"] += 1
+                game_iter.set_postfix(games=len(results), moves=offsets[-1], skipped=sum(skipped.values()))
                 continue
             packets = pgn_game_to_packets(game_text, tokenizer, seq_len)
             if packets is None or len(packets) < 2:
                 skipped["empty_or_bad_game"] += 1
+                game_iter.set_postfix(games=len(results), moves=offsets[-1], skipped=sum(skipped.values()))
                 continue
             all_moves.append(packets)
             results.append(RESULT_TO_LABEL[result])
             source_files.append(str(path))
             offsets.append(offsets[-1] + len(packets))
+            game_iter.set_postfix(games=len(results), moves=offsets[-1], skipped=sum(skipped.values()))
         if max_games and len(results) >= max_games:
             break
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    if progress:
+        print(f"concatenating {len(all_moves):,} games / {offsets[-1]:,} moves")
     moves = np.concatenate(all_moves, axis=0) if all_moves else np.empty((0, seq_len), dtype=np.uint16)
     offsets_arr = np.asarray(offsets, dtype=np.int64)
     results_arr = np.asarray(results, dtype=np.int64)
 
+    if progress:
+        print(f"writing arrays to {out_dir}")
     np.save(out_dir / "moves.npy", moves)
     np.save(out_dir / "offsets.npy", offsets_arr)
     np.save(out_dir / "results.npy", results_arr)
@@ -213,7 +236,14 @@ def sample_prefix_length(num_moves: int, rng: random.Random, buckets: list[Prefi
     return rng.randint(lo, hi), bucket.name
 
 
-def materialize_prefix_examples(out_dir: Path, context_moves: int, prefixes_per_game: int, mode: BucketMode, seed: int) -> dict:
+def materialize_prefix_examples(
+    out_dir: Path,
+    context_moves: int,
+    prefixes_per_game: int,
+    mode: BucketMode,
+    seed: int,
+    progress: bool = True,
+) -> dict:
     moves = np.load(out_dir / "moves.npy", mmap_mode="r")
     offsets = np.load(out_dir / "offsets.npy")
     results = np.load(out_dir / "results.npy")
@@ -230,7 +260,8 @@ def materialize_prefix_examples(out_dir: Path, context_moves: int, prefixes_per_
 
     row = 0
     with meta_path.open("w", encoding="utf-8") as meta:
-        for game_i, label in enumerate(results):
+        game_iter = tqdm(enumerate(results), total=len(results), desc="materializing prefixes", unit="game", disable=not progress)
+        for game_i, label in game_iter:
             start = int(offsets[game_i])
             end = int(offsets[game_i + 1])
             num_moves = end - start
@@ -248,7 +279,10 @@ def materialize_prefix_examples(out_dir: Path, context_moves: int, prefixes_per_
                 y[row] = int(label)
                 meta.write(json.dumps({"row": row, "game_i": game_i, "prefix_len": t, "bucket": bucket_name, "label": int(label)}) + "\n")
                 row += 1
+            game_iter.set_postfix(rows=row)
 
+    if progress:
+        print(f"flushing prefix arrays: {n:,} examples")
     x.flush()
     y.flush()
     prefix_manifest = {
@@ -278,13 +312,15 @@ def main() -> int:
     parser.add_argument("--prefixes-per-game", type=int, default=1)
     parser.add_argument("--bucket-mode", choices=["fraction", "absolute"], default="fraction")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--no-progress", action="store_true", help="Disable tqdm progress bars")
     args = parser.parse_args()
 
     missing = [p for p in args.inputs if not p.exists()]
     if missing:
         raise SystemExit("Missing input(s): " + ", ".join(str(p) for p in missing))
 
-    manifest = write_game_store(args.inputs, args.out_dir, args.seq_len, args.max_games)
+    progress = not args.no_progress
+    manifest = write_game_store(args.inputs, args.out_dir, args.seq_len, args.max_games, progress=progress)
     print(json.dumps({k: manifest[k] for k in ["num_games", "total_moves", "moves_shape", "skipped"]}, indent=2))
 
     if args.materialize_prefixes:
@@ -294,6 +330,7 @@ def main() -> int:
             prefixes_per_game=args.prefixes_per_game,
             mode=args.bucket_mode,
             seed=args.seed,
+            progress=progress,
         )
         print(json.dumps(prefix_manifest, indent=2))
     return 0
