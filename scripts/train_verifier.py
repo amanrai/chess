@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Train the verifier result classifier."""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from chessgm.trainer import VerifierTrainConfig, train_verifier  # noqa: E402
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data-dir", type=Path, default=ROOT / "data" / "processed" / "lumbras" / "verifier")
+    parser.add_argument("--context-moves", type=int, default=128)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument("--model-dim", type=int, default=256)
+    parser.add_argument("--heads", type=int, default=8)
+    parser.add_argument("--layers", type=int, default=6)
+    parser.add_argument("--dropout", type=float, default=0.0)
+    parser.add_argument("--examples-per-epoch", type=int, default=None)
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--checkpoint-dir", type=Path, default=ROOT / "checkpoints" / "verifier")
+    args = parser.parse_args()
+
+    config = VerifierTrainConfig(
+        data_dir=args.data_dir,
+        context_moves=args.context_moves,
+        batch_size=args.batch_size,
+        epochs=args.epochs,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        model_dim=args.model_dim,
+        heads=args.heads,
+        layers=args.layers,
+        dropout=args.dropout,
+        examples_per_epoch=args.examples_per_epoch,
+        num_workers=args.num_workers,
+        checkpoint_dir=args.checkpoint_dir,
+    )
+    if args.device is not None:
+        config.device = args.device
+
+    train_verifier(config)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,129 @@
+"""Datasets for preprocessed chess model arrays."""
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+
+
+@dataclass(frozen=True)
+class PrefixBucket:
+    name: str
+    lo: float
+    hi: float
+    weight: float = 1.0
+
+
+FRACTION_PREFIX_BUCKETS = [
+    PrefixBucket("first_20pct", 0.00, 0.20, 1.0),
+    PrefixBucket("middle_30pct", 0.20, 0.50, 1.0),
+    PrefixBucket("late_30pct", 0.50, 0.80, 1.0),
+    PrefixBucket("final_20pct", 0.80, 1.00, 1.0),
+]
+
+ABSOLUTE_PREFIX_BUCKETS = [
+    PrefixBucket("opening_1_16", 1, 16, 1.0),
+    PrefixBucket("early_mid_17_40", 17, 40, 1.0),
+    PrefixBucket("midgame_41_80", 41, 80, 1.0),
+    PrefixBucket("late_81_plus", 81, 10**9, 1.0),
+]
+
+
+def bucket_to_prefix_range(
+    num_moves: int,
+    bucket: PrefixBucket,
+    mode: str,
+) -> tuple[int, int] | None:
+    if num_moves <= 0:
+        return None
+    if mode == "absolute":
+        lo = int(bucket.lo)
+        hi = int(min(bucket.hi, num_moves))
+    elif mode == "fraction":
+        lo = max(1, int(num_moves * bucket.lo) + 1)
+        hi = max(lo, int(num_moves * bucket.hi))
+        hi = min(hi, num_moves)
+    else:
+        raise ValueError(f"unknown bucket mode: {mode}")
+    if lo > num_moves or hi < lo:
+        return None
+    return lo, hi
+
+
+def weighted_choice(items, weights, rng: random.Random):
+    total = sum(weights)
+    r = rng.random() * total
+    upto = 0.0
+    for item, weight in zip(items, weights):
+        upto += weight
+        if upto >= r:
+            return item
+    return items[-1]
+
+
+class VerifierGameStoreDataset(Dataset):
+    """Dynamically sample verifier prefixes from game-store arrays.
+
+    Expects files created by scripts/preprocess_verifier_dataset.py:
+      moves.npy, offsets.npy, results.npy
+    """
+
+    def __init__(
+        self,
+        root: str | Path,
+        context_moves: int = 128,
+        pad_id: int = 0,
+        bucket_mode: str = "fraction",
+        buckets: list[PrefixBucket] | None = None,
+        examples_per_epoch: int | None = None,
+        seed: int = 0,
+    ):
+        self.root = Path(root)
+        self.moves = np.load(self.root / "moves.npy", mmap_mode="r")
+        self.offsets = np.load(self.root / "offsets.npy", mmap_mode="r")
+        self.results = np.load(self.root / "results.npy", mmap_mode="r")
+        self.context_moves = context_moves
+        self.pad_id = pad_id
+        self.bucket_mode = bucket_mode
+        self.buckets = buckets or (FRACTION_PREFIX_BUCKETS if bucket_mode == "fraction" else ABSOLUTE_PREFIX_BUCKETS)
+        self.examples_per_epoch = examples_per_epoch or len(self.results)
+        self.seed = seed
+        self.move_expr = int(self.moves.shape[1])
+
+    def __len__(self) -> int:
+        return self.examples_per_epoch
+
+    def sample_prefix_length(self, num_moves: int, rng: random.Random) -> int:
+        valid = [b for b in self.buckets if bucket_to_prefix_range(num_moves, b, self.bucket_mode)]
+        if not valid:
+            return rng.randint(1, num_moves)
+        bucket = weighted_choice(valid, [b.weight for b in valid], rng)
+        lo, hi = bucket_to_prefix_range(num_moves, bucket, self.bucket_mode)  # type: ignore[misc]
+        return rng.randint(lo, hi)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        # Deterministic per index/epoch-ish sampling. Later trainer can vary seed per epoch.
+        rng = random.Random(self.seed + idx)
+        game_i = rng.randrange(len(self.results))
+        start = int(self.offsets[game_i])
+        end = int(self.offsets[game_i + 1])
+        num_moves = end - start
+        prefix_len = self.sample_prefix_length(num_moves, rng)
+        prefix = self.moves[start : start + prefix_len]
+
+        if len(prefix) >= self.context_moves:
+            x = prefix[-self.context_moves :]
+        else:
+            pad_rows = np.full(
+                (self.context_moves - len(prefix), self.move_expr),
+                self.pad_id,
+                dtype=np.uint16,
+            )
+            x = np.concatenate([pad_rows, prefix], axis=0)
+
+        y = int(self.results[game_i])
+        return torch.from_numpy(x.astype(np.int64)), torch.tensor(y, dtype=torch.long)

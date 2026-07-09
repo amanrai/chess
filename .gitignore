@@ -1,7 +1,8 @@
-# Data artifacts
+# Data/model artifacts
 /data/raw/
 /data/extracted/
 /data/processed/
+/checkpoints/
 
 # Python
 __pycache__/
