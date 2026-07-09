@@ -44,6 +44,12 @@ def accuracy(logits: torch.Tensor, y: torch.Tensor) -> float:
     return float((pred == y).float().mean().detach().cpu())
 
 
+def count_parameters(model: nn.Module) -> tuple[int, int]:
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return total, trainable
+
+
 def train_verifier(config: VerifierTrainConfig) -> VerifierTransformer:
     wandb_run = None
     if config.wandb:
@@ -77,6 +83,11 @@ def train_verifier(config: VerifierTrainConfig) -> VerifierTransformer:
         dropout=config.dropout,
         pad_id=0,
     ).to(config.device)
+
+    total_params, trainable_params = count_parameters(model)
+    print(f"model params: total={total_params / 1e6:.3f}M trainable={trainable_params / 1e6:.3f}M")
+    if wandb_run is not None:
+        wandb_run.log({"params_total_m": total_params / 1e6, "params_trainable_m": trainable_params / 1e6}, step=0)
 
     opt = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
     config.checkpoint_dir.mkdir(parents=True, exist_ok=True)
