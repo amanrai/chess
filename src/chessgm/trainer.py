@@ -1,7 +1,8 @@
 """Training helpers for chess models."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import torch
@@ -31,6 +32,11 @@ class VerifierTrainConfig:
     num_workers: int = 0
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     checkpoint_dir: Path = Path("checkpoints/verifier")
+    log_window: int = 1000
+    wandb: bool = False
+    wandb_project: str = "chess-gm"
+    wandb_run_name: str | None = None
+    wandb_log_every: int = 10
 
 
 def accuracy(logits: torch.Tensor, y: torch.Tensor) -> float:
@@ -39,6 +45,16 @@ def accuracy(logits: torch.Tensor, y: torch.Tensor) -> float:
 
 
 def train_verifier(config: VerifierTrainConfig) -> VerifierTransformer:
+    wandb_run = None
+    if config.wandb:
+        import wandb
+
+        wandb_run = wandb.init(
+            project=config.wandb_project,
+            name=config.wandb_run_name,
+            config={k: str(v) if isinstance(v, Path) else v for k, v in asdict(config).items()},
+        )
+
     dataset = VerifierGameStoreDataset(
         config.data_dir,
         context_moves=config.context_moves,
@@ -70,6 +86,8 @@ def train_verifier(config: VerifierTrainConfig) -> VerifierTransformer:
         pbar = tqdm(loader, desc=f"verifier epoch {epoch + 1}/{config.epochs}", unit="batch")
         running_loss = 0.0
         running_acc = 0.0
+        loss_window: deque[float] = deque(maxlen=config.log_window)
+        acc_window: deque[float] = deque(maxlen=config.log_window)
         for step, (x, y) in enumerate(pbar, start=1):
             x = x.to(config.device, non_blocking=True)
             y = y.to(config.device, non_blocking=True)
@@ -82,9 +100,31 @@ def train_verifier(config: VerifierTrainConfig) -> VerifierTransformer:
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
 
-            running_loss += float(loss.detach().cpu())
-            running_acc += accuracy(logits, y)
-            pbar.set_postfix(loss=running_loss / step, acc=running_acc / step)
+            loss_value = float(loss.detach().cpu())
+            acc_value = accuracy(logits, y)
+            running_loss += loss_value
+            running_acc += acc_value
+            loss_window.append(loss_value)
+            acc_window.append(acc_value)
+            global_step = epoch * len(loader) + step
+
+            metrics = {
+                "loss": loss_value,
+                f"loss_last_{config.log_window}": sum(loss_window) / len(loss_window),
+                "acc": acc_value,
+                f"acc_last_{config.log_window}": sum(acc_window) / len(acc_window),
+                "loss_epoch_avg": running_loss / step,
+                "acc_epoch_avg": running_acc / step,
+                "epoch": epoch + 1,
+                "step": global_step,
+            }
+            pbar.set_postfix(
+                loss_1000=metrics[f"loss_last_{config.log_window}"],
+                acc_1000=metrics[f"acc_last_{config.log_window}"],
+                loss=loss_value,
+            )
+            if wandb_run is not None and (step % config.wandb_log_every == 0):
+                wandb_run.log(metrics, step=global_step)
 
         ckpt_path = config.checkpoint_dir / f"verifier_epoch_{epoch + 1}.pt"
         torch.save(
@@ -96,5 +136,9 @@ def train_verifier(config: VerifierTrainConfig) -> VerifierTransformer:
             },
             ckpt_path,
         )
+        if wandb_run is not None:
+            wandb_run.log({"checkpoint_epoch": epoch + 1}, step=(epoch + 1) * len(loader))
 
+    if wandb_run is not None:
+        wandb_run.finish()
     return model

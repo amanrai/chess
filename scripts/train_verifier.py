@@ -28,6 +28,11 @@ def main() -> int:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--checkpoint-dir", type=Path, default=ROOT / "checkpoints" / "verifier")
+    parser.add_argument("--log-window", type=int, default=1000)
+    parser.add_argument("--wandb", action="store_true", help="Log metrics to Weights & Biases")
+    parser.add_argument("--wandb-project", type=str, default="chess-gm")
+    parser.add_argument("--wandb-run-name", type=str, default=None)
+    parser.add_argument("--wandb-log-every", type=int, default=10)
     args = parser.parse_args()
 
     config = VerifierTrainConfig(
@@ -44,6 +49,11 @@ def main() -> int:
         examples_per_epoch=args.examples_per_epoch,
         num_workers=args.num_workers,
         checkpoint_dir=args.checkpoint_dir,
+        log_window=args.log_window,
+        wandb=args.wandb,
+        wandb_project=args.wandb_project,
+        wandb_run_name=args.wandb_run_name,
+        wandb_log_every=args.wandb_log_every,
     )
     if args.device is not None:
         config.device = args.device
