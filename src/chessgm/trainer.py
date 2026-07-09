@@ -50,6 +50,31 @@ def count_parameters(model: nn.Module) -> tuple[int, int]:
     return total, trainable
 
 
+def class_precision_counts(logits: torch.Tensor, y: torch.Tensor, num_classes: int = 3) -> tuple[list[int], list[int]]:
+    pred = logits.argmax(dim=-1)
+    tp = []
+    predicted = []
+    for cls in range(num_classes):
+        pred_mask = pred == cls
+        tp.append(int((pred_mask & (y == cls)).sum().detach().cpu()))
+        predicted.append(int(pred_mask.sum().detach().cpu()))
+    return tp, predicted
+
+
+def rolling_precisions(window: deque[tuple[list[int], list[int]]]) -> dict[str, float]:
+    names = ["white", "black", "draw"]
+    tp = [0, 0, 0]
+    predicted = [0, 0, 0]
+    for batch_tp, batch_predicted in window:
+        for i in range(3):
+            tp[i] += batch_tp[i]
+            predicted[i] += batch_predicted[i]
+    return {
+        f"precision_{name}": (tp[i] / predicted[i] if predicted[i] else 0.0)
+        for i, name in enumerate(names)
+    }
+
+
 def train_verifier(config: VerifierTrainConfig) -> VerifierTransformer:
     wandb_run = None
     if config.wandb:
@@ -99,6 +124,7 @@ def train_verifier(config: VerifierTrainConfig) -> VerifierTransformer:
         running_acc = 0.0
         loss_window: deque[float] = deque(maxlen=config.log_window)
         acc_window: deque[float] = deque(maxlen=config.log_window)
+        precision_window: deque[tuple[list[int], list[int]]] = deque(maxlen=config.log_window)
         for step, (x, y) in enumerate(pbar, start=1):
             x = x.to(config.device, non_blocking=True)
             y = y.to(config.device, non_blocking=True)
@@ -117,6 +143,8 @@ def train_verifier(config: VerifierTrainConfig) -> VerifierTransformer:
             running_acc += acc_value
             loss_window.append(loss_value)
             acc_window.append(acc_value)
+            precision_window.append(class_precision_counts(logits, y))
+            precisions = rolling_precisions(precision_window)
             global_step = epoch * len(loader) + step
 
             metrics = {
@@ -126,13 +154,16 @@ def train_verifier(config: VerifierTrainConfig) -> VerifierTransformer:
                 f"acc_last_{config.log_window}": sum(acc_window) / len(acc_window),
                 "loss_epoch_avg": running_loss / step,
                 "acc_epoch_avg": running_acc / step,
+                **{f"{k}_last_{config.log_window}": v for k, v in precisions.items()},
                 "epoch": epoch + 1,
                 "step": global_step,
             }
             pbar.set_postfix(
                 loss_1000=metrics[f"loss_last_{config.log_window}"],
                 acc_1000=metrics[f"acc_last_{config.log_window}"],
-                loss=loss_value,
+                p_w=precisions["precision_white"],
+                p_b=precisions["precision_black"],
+                p_d=precisions["precision_draw"],
             )
             if wandb_run is not None and (step % config.wandb_log_every == 0):
                 wandb_run.log(metrics, step=global_step)
