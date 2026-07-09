@@ -115,14 +115,20 @@ class ArtisanalRoPEAttention(nn.Module):
         k = apply_rope(k, move_pos)
 
         scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)  # [B, H, N, N]
+        query_has_valid_key = None
         if attn_mask is not None:
             if attn_mask.dim() == 2:
                 attn_mask = attn_mask[None, None, :, :]
             elif attn_mask.dim() == 3:
                 attn_mask = attn_mask[:, None, :, :]
+            query_has_valid_key = attn_mask.any(dim=-1, keepdim=True)
             scores = scores.masked_fill(~attn_mask, float("-inf"))
+            # Fully masked query rows otherwise become softmax(-inf, ...) = NaN.
+            scores = scores.masked_fill(~query_has_valid_key, 0.0)
 
         attn = self.dropout(scores.softmax(dim=-1))
+        if query_has_valid_key is not None:
+            attn = attn.masked_fill(~query_has_valid_key, 0.0)
         y = attn @ v  # [B, H, N, Dh]
         y = y.transpose(1, 2).contiguous().view(b, n, d)
         return self.out(y)
