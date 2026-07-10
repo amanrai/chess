@@ -81,6 +81,8 @@ class VerifierGameStoreDataset(Dataset):
         buckets: list[PrefixBucket] | None = None,
         examples_per_epoch: int | None = None,
         seed: int = 0,
+        sample_mode: str = "prefix",
+        max_game_moves: int | None = None,
     ):
         self.root = Path(root)
         self.moves = np.load(self.root / "moves.npy", mmap_mode="r")
@@ -90,9 +92,23 @@ class VerifierGameStoreDataset(Dataset):
         self.pad_id = pad_id
         self.bucket_mode = bucket_mode
         self.buckets = buckets or (FRACTION_PREFIX_BUCKETS if bucket_mode == "fraction" else ABSOLUTE_PREFIX_BUCKETS)
-        self.examples_per_epoch = examples_per_epoch or len(self.results)
         self.seed = seed
         self.move_expr = int(self.moves.shape[1])
+        self.sample_mode = sample_mode
+        self.max_game_moves = max_game_moves
+
+        if sample_mode not in {"prefix", "full"}:
+            raise ValueError(f"unknown sample_mode={sample_mode!r}; expected 'prefix' or 'full'")
+        game_lengths = np.diff(self.offsets)
+        valid_mask = np.ones(len(self.results), dtype=bool)
+        if max_game_moves is not None:
+            valid_mask &= game_lengths <= max_game_moves
+        self.game_indices = np.flatnonzero(valid_mask).astype(np.int64)
+        if len(self.game_indices) == 0:
+            raise ValueError(
+                f"no verifier games left after filtering max_game_moves={max_game_moves}"
+            )
+        self.examples_per_epoch = examples_per_epoch or len(self.game_indices)
 
     def __len__(self) -> int:
         return self.examples_per_epoch
@@ -108,12 +124,19 @@ class VerifierGameStoreDataset(Dataset):
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         # Deterministic per index/epoch-ish sampling. Later trainer can vary seed per epoch.
         rng = random.Random(self.seed + idx)
-        game_i = rng.randrange(len(self.results))
+        if self.sample_mode == "full" and self.examples_per_epoch == len(self.game_indices):
+            game_i = int(self.game_indices[idx % len(self.game_indices)])
+        else:
+            game_i = int(self.game_indices[rng.randrange(len(self.game_indices))])
         start = int(self.offsets[game_i])
         end = int(self.offsets[game_i + 1])
         num_moves = end - start
-        prefix_len = self.sample_prefix_length(num_moves, rng)
-        prefix = self.moves[start : start + prefix_len]
+
+        if self.sample_mode == "full":
+            prefix = self.moves[start:end]
+        else:
+            prefix_len = self.sample_prefix_length(num_moves, rng)
+            prefix = self.moves[start : start + prefix_len]
 
         if len(prefix) >= self.context_moves:
             x = prefix[-self.context_moves :]
