@@ -1,6 +1,7 @@
 """Datasets for preprocessed chess model arrays."""
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -82,7 +83,11 @@ class VerifierGameStoreDataset(Dataset):
         examples_per_epoch: int | None = None,
         seed: int = 0,
         sample_mode: str = "prefix",
+        min_game_moves: int | None = None,
         max_game_moves: int | None = None,
+        prefix_fraction: float | None = None,
+        prefix_fraction_min: float | None = None,
+        prefix_fraction_max: float | None = None,
     ):
         self.root = Path(root)
         self.moves = np.load(self.root / "moves.npy", mmap_mode="r")
@@ -95,18 +100,42 @@ class VerifierGameStoreDataset(Dataset):
         self.seed = seed
         self.move_expr = int(self.moves.shape[1])
         self.sample_mode = sample_mode
+        self.min_game_moves = min_game_moves
         self.max_game_moves = max_game_moves
+        self.prefix_fraction = prefix_fraction
+        self.prefix_fraction_min = prefix_fraction_min
+        self.prefix_fraction_max = prefix_fraction_max
 
         if sample_mode not in {"prefix", "full"}:
             raise ValueError(f"unknown sample_mode={sample_mode!r}; expected 'prefix' or 'full'")
+        if prefix_fraction is not None and (
+            prefix_fraction_min is not None or prefix_fraction_max is not None
+        ):
+            raise ValueError("use either prefix_fraction or prefix_fraction_min/max, not both")
+        for name, value in {
+            "prefix_fraction": prefix_fraction,
+            "prefix_fraction_min": prefix_fraction_min,
+            "prefix_fraction_max": prefix_fraction_max,
+        }.items():
+            if value is not None and not (0.0 < value <= 1.0):
+                raise ValueError(f"{name} must be in (0, 1], got {value}")
+        if (
+            prefix_fraction_min is not None
+            and prefix_fraction_max is not None
+            and prefix_fraction_min > prefix_fraction_max
+        ):
+            raise ValueError("prefix_fraction_min must be <= prefix_fraction_max")
         game_lengths = np.diff(self.offsets)
         valid_mask = np.ones(len(self.results), dtype=bool)
+        if min_game_moves is not None:
+            valid_mask &= game_lengths >= min_game_moves
         if max_game_moves is not None:
             valid_mask &= game_lengths <= max_game_moves
         self.game_indices = np.flatnonzero(valid_mask).astype(np.int64)
         if len(self.game_indices) == 0:
             raise ValueError(
-                f"no verifier games left after filtering max_game_moves={max_game_moves}"
+                "no verifier games left after filtering "
+                f"min_game_moves={min_game_moves} max_game_moves={max_game_moves}"
             )
         self.examples_per_epoch = examples_per_epoch or len(self.game_indices)
 
@@ -114,6 +143,14 @@ class VerifierGameStoreDataset(Dataset):
         return self.examples_per_epoch
 
     def sample_prefix_length(self, num_moves: int, rng: random.Random) -> int:
+        if self.prefix_fraction is not None:
+            return max(1, min(num_moves, math.ceil(num_moves * self.prefix_fraction)))
+        if self.prefix_fraction_min is not None or self.prefix_fraction_max is not None:
+            lo = self.prefix_fraction_min if self.prefix_fraction_min is not None else 0.0
+            hi = self.prefix_fraction_max if self.prefix_fraction_max is not None else 1.0
+            fraction = rng.uniform(lo, hi)
+            return max(1, min(num_moves, math.ceil(num_moves * fraction)))
+
         valid = [b for b in self.buckets if bucket_to_prefix_range(num_moves, b, self.bucket_mode)]
         if not valid:
             return rng.randint(1, num_moves)

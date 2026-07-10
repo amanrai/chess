@@ -113,7 +113,15 @@ workers/chunksize used
 
 ## 4. Optional: materialize sampled verifier prefixes
 
-Normally we can sample prefixes dynamically during training from `moves.npy + offsets.npy + results.npy`.
+Normally we sample prefixes dynamically during training from `moves.npy + offsets.npy + results.npy`.
+The dynamic Q-verifier trainer supports controlled percentage-based prefixes, e.g. `--prefix-fraction 0.5`, plus game-length filters like `--min-game-moves` and `--max-game-moves`.
+
+Important distinction:
+
+- prefix fraction / prefix length: how much of the original game is sampled
+- context moves: how many sampled move packets the model can see after crop/pad
+
+Use percentage-based prefixes for interpretable partial-game probes. A fixed context window by itself can include whole short games.
 
 If you want a fixed prefix dataset:
 

@@ -71,12 +71,16 @@ Prefix probe command shape:
 uv run python scripts/train_encoder_q.py \
   --batch-size 32 \
   --sample-mode prefix \
-  --context-moves 100 \
+  --prefix-fraction 0.5 \
+  --context-moves 125 \
+  --min-game-moves 100 \
   --max-game-moves 250 \
   --model-dim 256 \
   --heads 16 \
   --grad-accum-steps 16
 ```
+
+For interpretation, prefix experiments should prefer percentage-based prefixes over fixed context-only controls. `--context-moves` is only the model window; it does not define how much of the original game is sampled. A half-game probe should explicitly set `--prefix-fraction 0.5`, then set `--context-moves` large enough to avoid truncating the sampled half-game prefix.
 
 ## Phase 2: contrastive trajectory training
 

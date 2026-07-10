@@ -99,14 +99,18 @@ Working notes while discussing architecture. Not final.
 
 ### Verifier prefix sampling
 
-- Verifier training should support bucketed prefix sampling.
+- Verifier training should distinguish clearly between:
+  - prefix length: how much of the original game is sampled
+  - context window: how many sampled move packets the model can see after crop/pad
+- For controlled partial-game experiments, prefer percentage-based prefixes such as exactly 50% of each game.
+- Fixed context alone is not enough for interpretation: `context_moves=100` can include entire short games, which makes a supposed half-game experiment ambiguous.
 - Same game can provide many samples by choosing different prefix lengths.
 - Prefix length distribution matters:
   - early prefixes: opening/result priors, high uncertainty
   - mid prefixes: positional evaluation
   - late prefixes: conversion/decisive-state recognition
-- Support absolute ply buckets and fraction-of-game buckets.
-- Training sampler should choose: bucket -> game with valid prefix -> prefix length -> crop/pad context.
+- Support exact fraction prefixes, random fraction ranges, absolute ply buckets, and fraction-of-game buckets.
+- Training sampler should choose: game passing length filters -> prefix fraction or bucket -> prefix length -> crop/pad context.
 - Preprocessing can be iterated on a Tailnet/Jupyter machine before transferring compact tokenized datasets to Vast.
 
 ### State representation ablation

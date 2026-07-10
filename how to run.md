@@ -25,11 +25,31 @@ uv run python scripts/train_encoder_q.py \
 Notes:
 
 - `--sample-mode full` feeds the full game into the verifier dataset before truncation/padding to `--context-moves`.
-- `--sample-mode prefix` samples a random prefix length from prefix buckets and labels it with the final game result.
-- `--bucket-mode fraction` chooses equally among first 20%, 20-50%, 50-80%, and final 20% of each game, then samples uniformly inside that bucket.
+- `--sample-mode prefix` samples an incomplete prefix and labels it with the final game result.
+- For controlled partial-game experiments, prefer `--prefix-fraction`, e.g. `--prefix-fraction 0.5` for exactly the first half of each sampled game.
+- `--prefix-fraction-min` / `--prefix-fraction-max` sample a random percentage range, e.g. `0.4` to `0.6`.
+- If no explicit prefix fraction is set, `--bucket-mode fraction` chooses equally among first 20%, 20-50%, 50-80%, and final 20% of each game, then samples uniformly inside that bucket.
 - `--bucket-mode absolute` chooses equally among plies 1-16, 17-40, 41-80, and 81+.
 - `--max-game-moves 200` excludes games longer than 200 move packets/plies; it does not force every prefix to be 200 plies.
+- `--min-game-moves` excludes very short games if you do not want tiny games dominating or becoming trivial.
 - If a sample has more rows than `--context-moves`, the dataset keeps the last `--context-moves` rows.
+
+### Half-game prefix example
+
+This uses the first 50% of each sampled game, filters to games with 100-250 plies, and keeps enough context to avoid truncating half of a 250-ply game:
+
+```bash
+uv run python scripts/train_encoder_q.py \
+  --batch-size 32 \
+  --sample-mode prefix \
+  --prefix-fraction 0.5 \
+  --context-moves 125 \
+  --min-game-moves 100 \
+  --max-game-moves 250 \
+  --model-dim 256 \
+  --heads 16 \
+  --grad-accum-steps 16
+```
 
 ### Q-Verifier options
 
@@ -40,8 +60,12 @@ Defaults are shown in parentheses.
 --context-moves INT         Number of move packets in model context (128)
 --sample-mode {prefix,full} Prefix sampling or full-game samples (prefix)
 --bucket-mode {fraction,absolute}
-                            Prefix bucket strategy when sample-mode is prefix (fraction)
+                            Prefix bucket strategy when sample-mode is prefix and no explicit prefix fraction is set (fraction)
+--min-game-moves INT        Exclude games shorter than this many move packets/plies (unset)
 --max-game-moves INT        Exclude games longer than this many move packets/plies (unset)
+--prefix-fraction FLOAT     Use exactly this fraction of each game as the prefix, e.g. 0.5 for half-game (unset)
+--prefix-fraction-min FLOAT Minimum random prefix fraction; used with --prefix-fraction-max (unset)
+--prefix-fraction-max FLOAT Maximum random prefix fraction; used with --prefix-fraction-min (unset)
 --batch-size INT            Per-step batch size (32)
 --grad-accum-steps INT      Gradient accumulation steps; effective batch = batch-size * grad-accum-steps (8)
 --epochs INT                Training epochs (1)

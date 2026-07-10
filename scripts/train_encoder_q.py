@@ -91,10 +91,34 @@ def main() -> int:
         help="Prefix sampling buckets used when --sample-mode prefix",
     )
     parser.add_argument(
+        "--min-game-moves",
+        type=int,
+        default=None,
+        help="Exclude games with fewer than this many move packets/plies before sampling",
+    )
+    parser.add_argument(
         "--max-game-moves",
         type=int,
         default=None,
         help="Exclude games with more than this many move packets/plies before sampling",
+    )
+    parser.add_argument(
+        "--prefix-fraction",
+        type=float,
+        default=None,
+        help="Use exactly this fraction of each game as the prefix, e.g. 0.5 for half-game",
+    )
+    parser.add_argument(
+        "--prefix-fraction-min",
+        type=float,
+        default=None,
+        help="Minimum random prefix fraction; used with --prefix-fraction-max",
+    )
+    parser.add_argument(
+        "--prefix-fraction-max",
+        type=float,
+        default=None,
+        help="Maximum random prefix fraction; used with --prefix-fraction-min",
     )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--grad-accum-steps", type=int, default=8)
@@ -126,7 +150,11 @@ def main() -> int:
         examples_per_epoch=args.examples_per_epoch,
         sample_mode=args.sample_mode,
         bucket_mode=args.bucket_mode,
+        min_game_moves=args.min_game_moves,
         max_game_moves=args.max_game_moves,
+        prefix_fraction=args.prefix_fraction,
+        prefix_fraction_min=args.prefix_fraction_min,
+        prefix_fraction_max=args.prefix_fraction_max,
     )
     print(
         "dataset: "
@@ -134,7 +162,10 @@ def main() -> int:
         f"examples_per_epoch={len(dataset):,} "
         f"sample_mode={args.sample_mode} "
         f"bucket_mode={args.bucket_mode} "
+        f"prefix_fraction={args.prefix_fraction} "
+        f"prefix_fraction_range=({args.prefix_fraction_min}, {args.prefix_fraction_max}) "
         f"context_moves={args.context_moves} "
+        f"min_game_moves={args.min_game_moves} "
         f"max_game_moves={args.max_game_moves}"
     )
     loader = DataLoader(
