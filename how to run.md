@@ -25,8 +25,11 @@ uv run python scripts/train_encoder_q.py \
 Notes:
 
 - `--sample-mode full` feeds the full game into the verifier dataset before truncation/padding to `--context-moves`.
-- `--max-game-moves 200` excludes games longer than 200 move packets/plies.
-- If a full game has more rows than `--context-moves`, the dataset keeps the last `--context-moves` rows.
+- `--sample-mode prefix` samples a random prefix length from prefix buckets and labels it with the final game result.
+- `--bucket-mode fraction` chooses equally among first 20%, 20-50%, 50-80%, and final 20% of each game, then samples uniformly inside that bucket.
+- `--bucket-mode absolute` chooses equally among plies 1-16, 17-40, 41-80, and 81+.
+- `--max-game-moves 200` excludes games longer than 200 move packets/plies; it does not force every prefix to be 200 plies.
+- If a sample has more rows than `--context-moves`, the dataset keeps the last `--context-moves` rows.
 
 ### Q-Verifier options
 
@@ -36,6 +39,8 @@ Defaults are shown in parentheses.
 --data-dir PATH             Verifier game-store directory (data/processed/lumbras/verifier)
 --context-moves INT         Number of move packets in model context (128)
 --sample-mode {prefix,full} Prefix sampling or full-game samples (prefix)
+--bucket-mode {fraction,absolute}
+                            Prefix bucket strategy when sample-mode is prefix (fraction)
 --max-game-moves INT        Exclude games longer than this many move packets/plies (unset)
 --batch-size INT            Per-step batch size (32)
 --grad-accum-steps INT      Gradient accumulation steps; effective batch = batch-size * grad-accum-steps (8)
@@ -52,13 +57,21 @@ Defaults are shown in parentheses.
 --num-workers INT           DataLoader workers (0)
 --device STR                Device, e.g. cuda, cuda:0, cpu (cuda if available else cpu)
 --checkpoint-dir PATH       Output checkpoint directory (checkpoints/q_verifier)
+--snapshot-every-batches INT
+                            Save an in-epoch snapshot every N batches; 0 disables (5000)
 --log-window INT            Rolling metric window in batches (1000)
 ```
 
-Checkpoints are written as:
+End-of-epoch checkpoints are written as:
 
 ```text
 checkpoints/q_verifier/q_verifier_epoch_<N>.pt
+```
+
+In-epoch snapshots are written every `--snapshot-every-batches` batches by default:
+
+```text
+checkpoints/q_verifier/q_verifier_epoch_<EEE>_batch_<BBBBBB>.pt
 ```
 
 ## Build the Verifier Game Store

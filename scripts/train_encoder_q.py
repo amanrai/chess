@@ -56,11 +56,40 @@ def rolling_precisions(window: deque[tuple[list[int], list[int]]]) -> dict[str, 
     }
 
 
+def save_checkpoint(
+    path: Path,
+    model: nn.Module,
+    opt: torch.optim.Optimizer,
+    args: argparse.Namespace,
+    epoch: int,
+    batch: int,
+    global_batch: int,
+) -> None:
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "optimizer": opt.state_dict(),
+            "args": vars(args),
+            "vocab": VOCAB,
+            "epoch": epoch,
+            "batch": batch,
+            "global_batch": global_batch,
+        },
+        path,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data" / "processed" / "lumbras" / "verifier")
     parser.add_argument("--context-moves", type=int, default=128)
     parser.add_argument("--sample-mode", choices=["prefix", "full"], default="prefix")
+    parser.add_argument(
+        "--bucket-mode",
+        choices=["fraction", "absolute"],
+        default="fraction",
+        help="Prefix sampling buckets used when --sample-mode prefix",
+    )
     parser.add_argument(
         "--max-game-moves",
         type=int,
@@ -82,6 +111,12 @@ def main() -> int:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--checkpoint-dir", type=Path, default=ROOT / "checkpoints" / "q_verifier")
+    parser.add_argument(
+        "--snapshot-every-batches",
+        type=int,
+        default=5000,
+        help="Save an in-epoch snapshot every N batches; 0 disables",
+    )
     parser.add_argument("--log-window", type=int, default=1000)
     args = parser.parse_args()
 
@@ -90,6 +125,7 @@ def main() -> int:
         context_moves=args.context_moves,
         examples_per_epoch=args.examples_per_epoch,
         sample_mode=args.sample_mode,
+        bucket_mode=args.bucket_mode,
         max_game_moves=args.max_game_moves,
     )
     print(
@@ -97,6 +133,7 @@ def main() -> int:
         f"games={len(dataset.game_indices):,} "
         f"examples_per_epoch={len(dataset):,} "
         f"sample_mode={args.sample_mode} "
+        f"bucket_mode={args.bucket_mode} "
         f"context_moves={args.context_moves} "
         f"max_game_moves={args.max_game_moves}"
     )
@@ -125,6 +162,8 @@ def main() -> int:
 
     if args.grad_accum_steps < 1:
         raise ValueError(f"--grad-accum-steps must be >= 1, got {args.grad_accum_steps}")
+    if args.snapshot_every_batches < 0:
+        raise ValueError(f"--snapshot-every-batches must be >= 0, got {args.snapshot_every_batches}")
     print(
         f"optimization: batch_size={args.batch_size} "
         f"grad_accum_steps={args.grad_accum_steps} "
@@ -134,6 +173,7 @@ def main() -> int:
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+    global_batch = 0
     for epoch in range(args.epochs):
         model.train()
         opt.zero_grad(set_to_none=True)
@@ -142,6 +182,7 @@ def main() -> int:
         precision_window: deque[tuple[list[int], list[int]]] = deque(maxlen=args.log_window)
         pbar = tqdm(loader, desc=f"q-verifier epoch {epoch + 1}/{args.epochs}", unit="batch")
         for step, (x, y) in enumerate(pbar, start=1):
+            global_batch += 1
             x = x.to(args.device, non_blocking=True)
             y = y.to(args.device, non_blocking=True)
             logits = model(x)
@@ -171,16 +212,32 @@ def main() -> int:
                 cyan = "\033[36m"
                 reset = "\033[0m"
                 pbar.write(f"{cyan}epoch={epoch + 1} batch={step}/{len(loader)} {metrics_text}{reset}")
+                precision_window.clear()
+
+            if args.snapshot_every_batches and step % args.snapshot_every_batches == 0:
+                snapshot_path = (
+                    args.checkpoint_dir / f"q_verifier_epoch_{epoch + 1:03d}_batch_{step:06d}.pt"
+                )
+                save_checkpoint(
+                    snapshot_path,
+                    model=model,
+                    opt=opt,
+                    args=args,
+                    epoch=epoch + 1,
+                    batch=step,
+                    global_batch=global_batch,
+                )
+                pbar.write(f"saved snapshot: {snapshot_path}")
 
         ckpt_path = args.checkpoint_dir / f"q_verifier_epoch_{epoch + 1}.pt"
-        torch.save(
-            {
-                "model": model.state_dict(),
-                "args": vars(args),
-                "vocab": VOCAB,
-                "epoch": epoch + 1,
-            },
+        save_checkpoint(
             ckpt_path,
+            model=model,
+            opt=opt,
+            args=args,
+            epoch=epoch + 1,
+            batch=len(loader),
+            global_batch=global_batch,
         )
 
     return 0
