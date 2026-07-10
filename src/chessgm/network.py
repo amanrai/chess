@@ -17,26 +17,26 @@ class ArtisanalEmbedder(nn.Module):
     Output shape:
       x: [B, T, S, D]
 
-    `S` is the number of tokens used to express a single move, currently 8.
+    `S` is the number of tokens used to express a single ply, currently 8.
     """
 
-    def __init__(self, vocab_size: int, model_dim: int, within_move_positions: int = 0):
+    def __init__(self, vocab_size: int, model_dim: int, within_ply_positions: int = 0):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, model_dim)
-        self.within_move_positions = within_move_positions
-        self.move_pos_emb = (
-            nn.Embedding(within_move_positions, model_dim) if within_move_positions else None
+        self.within_ply_positions = within_ply_positions
+        self.ply_pos_emb = (
+            nn.Embedding(within_ply_positions, model_dim) if within_ply_positions else None
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.embedding(x)
-        if self.move_pos_emb is not None:
-            if x.shape[-1] != self.within_move_positions:
+        if self.ply_pos_emb is not None:
+            if x.shape[-1] != self.within_ply_positions:
                 raise ValueError(
-                    f"expected last dim {self.within_move_positions}, got {x.shape[-1]}"
+                    f"expected last dim {self.within_ply_positions}, got {x.shape[-1]}"
                 )
-            p = torch.arange(self.within_move_positions, device=x.device)
-            out = out + self.move_pos_emb(p)
+            p = torch.arange(self.within_ply_positions, device=x.device)
+            out = out + self.ply_pos_emb(p)
         return out
 
 
@@ -46,33 +46,33 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
     return torch.stack((-x2, x1), dim=-1).flatten(-2)
 
 
-def apply_rope(x: torch.Tensor, move_pos: torch.Tensor) -> torch.Tensor:
+def apply_rope(x: torch.Tensor, ply_pos: torch.Tensor) -> torch.Tensor:
     """Apply RoPE to q/k.
 
     Args:
       x: [B, H, N, Dh]
-      move_pos: [N], position id for each flattened token.
-        For chess move packets this repeats the move index for all slots:
+      ply_pos: [N], position id for each flattened token.
+        For chess ply packets this repeats the ply index for all slots:
         [0,0,0,0,0,0,0,0, 1,1,1,1,1,1,1,1, ...]
     """
     dim = x.shape[-1]
     if dim % 2 != 0:
         raise ValueError(f"RoPE head dim must be even, got {dim}")
     inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2, device=x.device).float() / dim))
-    freqs = torch.einsum("n,d->nd", move_pos.float(), inv_freq)
+    freqs = torch.einsum("n,d->nd", ply_pos.float(), inv_freq)
     emb = torch.repeat_interleave(freqs, repeats=2, dim=-1)
     cos = emb.cos()[None, None, :, :]
     sin = emb.sin()[None, None, :, :]
     return (x * cos) + (rotate_half(x) * sin)
 
 
-def chess_move_positions(num_moves: int, move_expr: int, device: torch.device) -> torch.Tensor:
-    """Build move-level positions for flattened move packets."""
-    return torch.arange(num_moves, device=device).repeat_interleave(move_expr)
+def chess_ply_positions(num_plies: int, ply_expr: int, device: torch.device) -> torch.Tensor:
+    """Build ply-level positions for flattened ply packets."""
+    return torch.arange(num_plies, device=device).repeat_interleave(ply_expr)
 
 
 class ArtisanalRoPEAttention(nn.Module):
-    """Multi-head self-attention with chess move-level RoPE."""
+    """Multi-head self-attention with chess ply-level RoPE."""
 
     def __init__(self, model_dim: int, heads: int, dropout: float = 0.0):
         super().__init__()
@@ -91,14 +91,14 @@ class ArtisanalRoPEAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        move_pos: torch.Tensor,
+        ply_pos: torch.Tensor,
         attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Run attention.
 
         Args:
           x: [B, N, D]
-          move_pos: [N]
+          ply_pos: [N]
           attn_mask: optional bool mask broadcastable as [B or 1, H or 1, N, N].
             True means allowed, False means blocked.
         """
@@ -111,8 +111,8 @@ class ArtisanalRoPEAttention(nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        q = apply_rope(q, move_pos)
-        k = apply_rope(k, move_pos)
+        q = apply_rope(q, ply_pos)
+        k = apply_rope(k, ply_pos)
 
         scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)  # [B, H, N, N]
         query_has_valid_key = None
@@ -159,18 +159,18 @@ class TransformerBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        move_pos: torch.Tensor,
+        ply_pos: torch.Tensor,
         attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        x = x + self.attn(self.ln1(x), move_pos, attn_mask)
+        x = x + self.attn(self.ln1(x), ply_pos, attn_mask)
         x = x + self.mlp(self.ln2(x))
         return x
 
 
-def build_move_causal_mask(num_moves: int, move_expr: int, device: torch.device) -> torch.Tensor:
-    """Allow attention to current/prior moves, never future moves."""
-    move_idx = chess_move_positions(num_moves, move_expr, device)
-    return move_idx[:, None] >= move_idx[None, :]
+def build_ply_causal_mask(num_plies: int, ply_expr: int, device: torch.device) -> torch.Tensor:
+    """Allow attention to current/prior plies, never future plies."""
+    ply_idx = chess_ply_positions(num_plies, ply_expr, device)
+    return ply_idx[:, None] >= ply_idx[None, :]
 
 
 def build_key_padding_attention_mask(x_ids: torch.Tensor, pad_id: int) -> torch.Tensor:
@@ -183,13 +183,13 @@ def build_key_padding_attention_mask(x_ids: torch.Tensor, pad_id: int) -> torch.
     return key_ok[:, None, :].expand(b, t * s, t * s)
 
 
-class MoveHistoryEncoder(nn.Module):
-    """Encode variable move history tokens with move-level RoPE."""
+class PlyHistoryEncoder(nn.Module):
+    """Encode variable ply history tokens with ply-level RoPE."""
 
     def __init__(
         self,
         vocab_size: int,
-        move_expr: int = 8,
+        ply_expr: int = 8,
         model_dim: int = 256,
         heads: int = 8,
         layers: int = 6,
@@ -198,18 +198,18 @@ class MoveHistoryEncoder(nn.Module):
         causal: bool = True,
     ):
         super().__init__()
-        self.move_expr = move_expr
+        self.ply_expr = ply_expr
         self.model_dim = model_dim
         self.pad_id = pad_id
         self.causal = causal
-        self.embedder = ArtisanalEmbedder(vocab_size, model_dim, within_move_positions=move_expr)
+        self.embedder = ArtisanalEmbedder(vocab_size, model_dim, within_ply_positions=ply_expr)
         self.blocks = nn.ModuleList(
             [TransformerBlock(model_dim, heads, dropout=dropout) for _ in range(layers)]
         )
         self.ln_f = nn.LayerNorm(model_dim)
 
     def forward(self, x_ids: torch.Tensor) -> torch.Tensor:
-        """Encode move packets.
+        """Encode ply packets.
 
         Args:
           x_ids: [B, T, S]
@@ -218,19 +218,19 @@ class MoveHistoryEncoder(nn.Module):
           encoded: [B, T*S, D]
         """
         b, t, s = x_ids.shape
-        if s != self.move_expr:
-            raise ValueError(f"expected move_expr={self.move_expr}, got {s}")
+        if s != self.ply_expr:
+            raise ValueError(f"expected ply_expr={self.ply_expr}, got {s}")
 
         x = self.embedder(x_ids)  # [B, T, S, D]
         x = x.reshape(b, t * s, self.model_dim)
-        move_pos = chess_move_positions(t, s, x.device)
+        ply_pos = chess_ply_positions(t, s, x.device)
 
         attn_mask = build_key_padding_attention_mask(x_ids, self.pad_id)
         if self.causal:
-            attn_mask = attn_mask & build_move_causal_mask(t, s, x.device)[None, :, :]
+            attn_mask = attn_mask & build_ply_causal_mask(t, s, x.device)[None, :, :]
 
         for block in self.blocks:
-            x = block(x, move_pos, attn_mask)
+            x = block(x, ply_pos, attn_mask)
         return self.ln_f(x)
 
 
@@ -247,7 +247,7 @@ class VerifierTransformer(nn.Module):
     def __init__(
         self,
         vocab_size: int,
-        move_expr: int = 8,
+        ply_expr: int = 8,
         model_dim: int = 256,
         heads: int = 8,
         layers: int = 6,
@@ -255,10 +255,10 @@ class VerifierTransformer(nn.Module):
         pad_id: int = 0,
     ):
         super().__init__()
-        self.move_expr = move_expr
-        self.encoder = MoveHistoryEncoder(
+        self.ply_expr = ply_expr
+        self.encoder = PlyHistoryEncoder(
             vocab_size=vocab_size,
-            move_expr=move_expr,
+            ply_expr=ply_expr,
             model_dim=model_dim,
             heads=heads,
             layers=layers,
@@ -276,20 +276,20 @@ class VerifierTransformer(nn.Module):
     def forward(self, x_ids: torch.Tensor) -> torch.Tensor:
         b, t, s = x_ids.shape
         encoded = self.encoder(x_ids)  # [B, T*S, D]
-        final_move = encoded[:, -s:, :].mean(dim=1)
-        return self.classifier(final_move)
+        final_ply = encoded[:, -s:, :].mean(dim=1)
+        return self.classifier(final_ply)
 
 
 class PacketARGenerator(nn.Module):
-    """Simple next-move packet generator baseline.
+    """Simple next-ply packet generator baseline.
 
-    Consumes a move-history prefix and predicts all slots of the next packet jointly.
+    Consumes a ply-history prefix and predicts all slots of the next packet jointly.
     """
 
     def __init__(
         self,
         vocab_size: int,
-        move_expr: int = 8,
+        ply_expr: int = 8,
         model_dim: int = 256,
         heads: int = 8,
         layers: int = 6,
@@ -297,10 +297,10 @@ class PacketARGenerator(nn.Module):
         pad_id: int = 0,
     ):
         super().__init__()
-        self.move_expr = move_expr
-        self.encoder = MoveHistoryEncoder(
+        self.ply_expr = ply_expr
+        self.encoder = PlyHistoryEncoder(
             vocab_size=vocab_size,
-            move_expr=move_expr,
+            ply_expr=ply_expr,
             model_dim=model_dim,
             heads=heads,
             layers=layers,
@@ -308,7 +308,7 @@ class PacketARGenerator(nn.Module):
             pad_id=pad_id,
             causal=True,
         )
-        self.next_slot_queries = nn.Parameter(torch.randn(move_expr, model_dim) / math.sqrt(model_dim))
+        self.next_slot_queries = nn.Parameter(torch.randn(ply_expr, model_dim) / math.sqrt(model_dim))
         self.head = nn.Linear(model_dim, vocab_size, bias=False)
 
     def forward(self, x_ids: torch.Tensor) -> torch.Tensor:

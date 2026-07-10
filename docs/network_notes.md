@@ -27,8 +27,8 @@ Working notes while discussing architecture. Not final.
 
 ## Diffusion part
 
-- Predict all tokens in the move packet in a single shot.
-- Treat move packet tokens like masked tokens to be filled jointly.
+- Predict all tokens in the ply packet in a single shot.
+- Treat ply packet tokens like masked tokens to be filled jointly.
 - During inference, may explore entropy-based improvement / refinement.
 
 ## Board state / Q-network-ish idea
@@ -49,11 +49,11 @@ Working notes while discussing architecture. Not final.
   - halfmove clock / repetition context if drawing rules matter
   - maybe move number / phase as derived context
 - Move history may still be useful as style/opening/player-distribution context, but not as the primary state representation.
-- Open question to investigate: pure move-history AR model vs explicit board-state model.
+- Open question to investigate: pure ply-history AR model vs explicit board-state model.
 - Notebook next step: implement a basic pure autoregressive transformer first.
 - No thinker yet.
 - No board-state embedding yet.
-- Main special thing: RoPE position increments by move index, not by token slot.
+- Main special thing: RoPE position increments by ply index, not by token slot.
 
 ## Thinker / board encoder direction
 
@@ -66,11 +66,11 @@ Working notes while discussing architecture. Not final.
   - square position embedding
   - small transformer or MLP over 64 squares
   - pooled `board_emb`
-- Planned move packet gets its own move encoder.
+- Planned ply packet gets its own move encoder.
 - Possible thinker inputs:
   - `board_emb`
   - planned move embedding
-  - optional move-history/context embedding
+  - optional ply-history/context embedding
   - recurrent/iterative `z_L`, `z_H` state
 - Iterative loop:
   - `plan_0 = <PAD>` packet
@@ -85,7 +85,7 @@ Working notes while discussing architecture. Not final.
 - Generator variant A: diffusion / masked packet generator.
   - Predicts all 8 move slots jointly.
 - Generator variant B: AR packet generator.
-  - Predicts move slots left-to-right within the move packet.
+  - Predicts move slots left-to-right within the ply packet.
   - Example order: piece/source/capture/destination/promotion/check-or-mate/`<EOM>`.
 - Keep thinker mostly constant and swap generator type.
 - This gives a clean ablation: joint move prediction vs intra-move autoregression.
@@ -95,15 +95,15 @@ Working notes while discussing architecture. Not final.
 ### Generator ablation
 
 - Joint packet generator vs AR packet generator.
-- Question: is it better to predict the whole move packet at once or autoregress within the move?
+- Question: is it better to predict the whole ply packet at once or autoregress within the move?
 
 ### Verifier prefix sampling
 
 - Verifier training should distinguish clearly between:
   - prefix length: how much of the original game is sampled
-  - context window: how many sampled move packets the model can see after crop/pad
+  - context window: how many sampled ply packets the model can see after crop/pad
 - For controlled partial-game experiments, prefer percentage-based prefixes such as exactly 50% of each game.
-- Fixed context alone is not enough for interpretation: `context_moves=100` can include entire short games, which makes a supposed half-game experiment ambiguous.
+- Fixed context alone is not enough for interpretation: `context_plies=100` can include entire short games, which makes a supposed half-game experiment ambiguous.
 - Same game can provide many samples by choosing different prefix lengths.
 - Prefix length distribution matters:
   - early prefixes: opening/result priors, high uncertainty
@@ -115,9 +115,9 @@ Working notes while discussing architecture. Not final.
 
 ### State representation ablation
 
-- Pure move-history AR model.
+- Pure ply-history AR model.
 - Explicit board-state encoder model.
-- Board-state + move-history hybrid.
+- Board-state + ply-history hybrid.
 - Question: does explicit Markov state reduce required context / improve legality / improve strength?
 
 ### Thinker/generator ablation
@@ -139,7 +139,7 @@ Working notes while discussing architecture. Not final.
 - Other questions:
   - Does larger `k` substitute for more parameters?
   - Does bottlenecking improve generalization at fixed compute?
-  - Does board-state encoding reduce the amount of move history needed?
+  - Does board-state encoding reduce the amount of ply history needed?
 
 ### Bottleneck hypothesis
 
@@ -151,6 +151,6 @@ Working notes while discussing architecture. Not final.
 
 - Each move is represented by multiple tokens: one packet of up to 8 token slots.
 - The collection of tokens represents a single move.
-- RoPE must be applied equally to all tokens within a move packet.
-- RoPE position increments by **move index**, not by token slot.
+- RoPE must be applied equally to all tokens within a ply packet.
+- RoPE position increments by **ply index**, not by token slot.
 - Tensor is conceptually `[batch, move_index, slot_index]`, not just a flat token stream.

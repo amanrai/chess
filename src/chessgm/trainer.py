@@ -19,7 +19,7 @@ from chessgm.tokenizer import VOCAB
 @dataclass
 class VerifierTrainConfig:
     data_dir: Path
-    context_moves: int = 128
+    context_plies: int = 128
     batch_size: int = 32
     epochs: int = 1
     lr: float = 3e-4
@@ -88,7 +88,7 @@ def train_verifier(config: VerifierTrainConfig) -> VerifierTransformer:
 
     dataset = VerifierGameStoreDataset(
         config.data_dir,
-        context_moves=config.context_moves,
+        context_plies=config.context_plies,
         examples_per_epoch=config.examples_per_epoch,
     )
     loader = DataLoader(
@@ -101,7 +101,7 @@ def train_verifier(config: VerifierTrainConfig) -> VerifierTransformer:
 
     model = VerifierTransformer(
         vocab_size=len(VOCAB),
-        move_expr=8,
+        ply_expr=8,
         model_dim=config.model_dim,
         heads=config.heads,
         layers=config.layers,

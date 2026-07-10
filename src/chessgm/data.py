@@ -35,22 +35,22 @@ ABSOLUTE_PREFIX_BUCKETS = [
 
 
 def bucket_to_prefix_range(
-    num_moves: int,
+    num_plies: int,
     bucket: PrefixBucket,
     mode: str,
 ) -> tuple[int, int] | None:
-    if num_moves <= 0:
+    if num_plies <= 0:
         return None
     if mode == "absolute":
         lo = int(bucket.lo)
-        hi = int(min(bucket.hi, num_moves))
+        hi = int(min(bucket.hi, num_plies))
     elif mode == "fraction":
-        lo = max(1, int(num_moves * bucket.lo) + 1)
-        hi = max(lo, int(num_moves * bucket.hi))
-        hi = min(hi, num_moves)
+        lo = max(1, int(num_plies * bucket.lo) + 1)
+        hi = max(lo, int(num_plies * bucket.hi))
+        hi = min(hi, num_plies)
     else:
         raise ValueError(f"unknown bucket mode: {mode}")
-    if lo > num_moves or hi < lo:
+    if lo > num_plies or hi < lo:
         return None
     return lo, hi
 
@@ -76,15 +76,15 @@ class VerifierGameStoreDataset(Dataset):
     def __init__(
         self,
         root: str | Path,
-        context_moves: int = 128,
+        context_plies: int = 128,
         pad_id: int = 0,
         bucket_mode: str = "fraction",
         buckets: list[PrefixBucket] | None = None,
         examples_per_epoch: int | None = None,
         seed: int = 0,
         sample_mode: str = "prefix",
-        min_game_moves: int | None = None,
-        max_game_moves: int | None = None,
+        min_game_plies: int | None = None,
+        max_game_plies: int | None = None,
         prefix_fraction: float | None = None,
         prefix_fraction_min: float | None = None,
         prefix_fraction_max: float | None = None,
@@ -93,15 +93,15 @@ class VerifierGameStoreDataset(Dataset):
         self.moves = np.load(self.root / "moves.npy", mmap_mode="r")
         self.offsets = np.load(self.root / "offsets.npy", mmap_mode="r")
         self.results = np.load(self.root / "results.npy", mmap_mode="r")
-        self.context_moves = context_moves
+        self.context_plies = context_plies
         self.pad_id = pad_id
         self.bucket_mode = bucket_mode
         self.buckets = buckets or (FRACTION_PREFIX_BUCKETS if bucket_mode == "fraction" else ABSOLUTE_PREFIX_BUCKETS)
         self.seed = seed
-        self.move_expr = int(self.moves.shape[1])
+        self.ply_expr = int(self.moves.shape[1])
         self.sample_mode = sample_mode
-        self.min_game_moves = min_game_moves
-        self.max_game_moves = max_game_moves
+        self.min_game_plies = min_game_plies
+        self.max_game_plies = max_game_plies
         self.prefix_fraction = prefix_fraction
         self.prefix_fraction_min = prefix_fraction_min
         self.prefix_fraction_max = prefix_fraction_max
@@ -125,37 +125,37 @@ class VerifierGameStoreDataset(Dataset):
             and prefix_fraction_min > prefix_fraction_max
         ):
             raise ValueError("prefix_fraction_min must be <= prefix_fraction_max")
-        game_lengths = np.diff(self.offsets)
+        game_lengths_plies = np.diff(self.offsets)
         valid_mask = np.ones(len(self.results), dtype=bool)
-        if min_game_moves is not None:
-            valid_mask &= game_lengths >= min_game_moves
-        if max_game_moves is not None:
-            valid_mask &= game_lengths <= max_game_moves
+        if min_game_plies is not None:
+            valid_mask &= game_lengths_plies >= min_game_plies
+        if max_game_plies is not None:
+            valid_mask &= game_lengths_plies <= max_game_plies
         self.game_indices = np.flatnonzero(valid_mask).astype(np.int64)
         if len(self.game_indices) == 0:
             raise ValueError(
                 "no verifier games left after filtering "
-                f"min_game_moves={min_game_moves} max_game_moves={max_game_moves}"
+                f"min_game_plies={min_game_plies} max_game_plies={max_game_plies}"
             )
         self.examples_per_epoch = examples_per_epoch or len(self.game_indices)
 
     def __len__(self) -> int:
         return self.examples_per_epoch
 
-    def sample_prefix_length(self, num_moves: int, rng: random.Random) -> int:
+    def sample_prefix_length(self, num_plies: int, rng: random.Random) -> int:
         if self.prefix_fraction is not None:
-            return max(1, min(num_moves, math.ceil(num_moves * self.prefix_fraction)))
+            return max(1, min(num_plies, math.ceil(num_plies * self.prefix_fraction)))
         if self.prefix_fraction_min is not None or self.prefix_fraction_max is not None:
             lo = self.prefix_fraction_min if self.prefix_fraction_min is not None else 0.0
             hi = self.prefix_fraction_max if self.prefix_fraction_max is not None else 1.0
             fraction = rng.uniform(lo, hi)
-            return max(1, min(num_moves, math.ceil(num_moves * fraction)))
+            return max(1, min(num_plies, math.ceil(num_plies * fraction)))
 
-        valid = [b for b in self.buckets if bucket_to_prefix_range(num_moves, b, self.bucket_mode)]
+        valid = [b for b in self.buckets if bucket_to_prefix_range(num_plies, b, self.bucket_mode)]
         if not valid:
-            return rng.randint(1, num_moves)
+            return rng.randint(1, num_plies)
         bucket = weighted_choice(valid, [b.weight for b in valid], rng)
-        lo, hi = bucket_to_prefix_range(num_moves, bucket, self.bucket_mode)  # type: ignore[misc]
+        lo, hi = bucket_to_prefix_range(num_plies, bucket, self.bucket_mode)  # type: ignore[misc]
         return rng.randint(lo, hi)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -167,19 +167,19 @@ class VerifierGameStoreDataset(Dataset):
             game_i = int(self.game_indices[rng.randrange(len(self.game_indices))])
         start = int(self.offsets[game_i])
         end = int(self.offsets[game_i + 1])
-        num_moves = end - start
+        num_plies = end - start
 
         if self.sample_mode == "full":
             prefix = self.moves[start:end]
         else:
-            prefix_len = self.sample_prefix_length(num_moves, rng)
+            prefix_len = self.sample_prefix_length(num_plies, rng)
             prefix = self.moves[start : start + prefix_len]
 
-        if len(prefix) >= self.context_moves:
-            x = prefix[-self.context_moves :]
+        if len(prefix) >= self.context_plies:
+            x = prefix[-self.context_plies :]
         else:
             pad_rows = np.full(
-                (self.context_moves - len(prefix), self.move_expr),
+                (self.context_plies - len(prefix), self.ply_expr),
                 self.pad_id,
                 dtype=np.uint16,
             )

@@ -15,7 +15,7 @@ from chessgm.trainer import VerifierTrainConfig, train_verifier  # noqa: E402
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data" / "processed" / "lumbras" / "verifier")
-    parser.add_argument("--context-moves", type=int, default=128)
+    parser.add_argument("--context-plies", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -37,7 +37,7 @@ def main() -> int:
 
     config = VerifierTrainConfig(
         data_dir=args.data_dir,
-        context_moves=args.context_moves,
+        context_plies=args.context_plies,
         batch_size=args.batch_size,
         epochs=args.epochs,
         lr=args.lr,

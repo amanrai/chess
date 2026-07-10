@@ -1,17 +1,17 @@
 """Q-Former style verifier network.
 
-Variable-length move history -> fixed [B, K, D] query output -> verifier logits.
+Variable-length ply history -> fixed [B, K, D] query output -> verifier logits.
 """
 from __future__ import annotations
 
 import torch
 from torch import nn
 
-from chessgm.network import MoveHistoryEncoder
+from chessgm.network import PlyHistoryEncoder
 
 
 class CrossAttentionBlock(nn.Module):
-    """Query tokens cross-attend to encoded move/history tokens."""
+    """Query tokens cross-attend to encoded ply-history tokens."""
 
     def __init__(self, model_dim: int, heads: int, mlp_mult: int = 4, dropout: float = 0.0):
         super().__init__()
@@ -47,8 +47,8 @@ class CrossAttentionBlock(nn.Module):
         return queries
 
 
-class QFormerMoveHistoryEncoder(nn.Module):
-    """Encode variable move history into fixed learned query slots.
+class QFormerPlyHistoryEncoder(nn.Module):
+    """Encode variable ply history into fixed learned query slots.
 
     Input:
       x_ids: [B, T, S]
@@ -60,7 +60,7 @@ class QFormerMoveHistoryEncoder(nn.Module):
     def __init__(
         self,
         vocab_size: int,
-        move_expr: int = 8,
+        ply_expr: int = 8,
         model_dim: int = 256,
         heads: int = 8,
         history_layers: int = 4,
@@ -70,13 +70,13 @@ class QFormerMoveHistoryEncoder(nn.Module):
         pad_id: int = 0,
     ):
         super().__init__()
-        self.move_expr = move_expr
+        self.ply_expr = ply_expr
         self.model_dim = model_dim
         self.num_queries = num_queries
         self.pad_id = pad_id
-        self.history_encoder = MoveHistoryEncoder(
+        self.history_encoder = PlyHistoryEncoder(
             vocab_size=vocab_size,
-            move_expr=move_expr,
+            ply_expr=ply_expr,
             model_dim=model_dim,
             heads=heads,
             layers=history_layers,
@@ -106,7 +106,7 @@ class QVerifierTransformer(nn.Module):
     def __init__(
         self,
         vocab_size: int,
-        move_expr: int = 8,
+        ply_expr: int = 8,
         model_dim: int = 256,
         heads: int = 8,
         history_layers: int = 4,
@@ -116,9 +116,9 @@ class QVerifierTransformer(nn.Module):
         pad_id: int = 0,
     ):
         super().__init__()
-        self.encoder = QFormerMoveHistoryEncoder(
+        self.encoder = QFormerPlyHistoryEncoder(
             vocab_size=vocab_size,
-            move_expr=move_expr,
+            ply_expr=ply_expr,
             model_dim=model_dim,
             heads=heads,
             history_layers=history_layers,

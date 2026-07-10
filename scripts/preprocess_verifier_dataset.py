@@ -3,7 +3,7 @@
 
 Default output is a game-level token store:
 
-  moves.npy    uint16[total_moves, seq_len]
+  moves.npy    uint16[total_plies, seq_len]
   offsets.npy  int64[num_games + 1]
   results.npy  int64[num_games]  # 0 white win, 1 black win, 2 draw
   manifest.json
@@ -13,7 +13,7 @@ prefixes from the same game without materializing every prefix.
 
 Optional: --materialize-prefixes creates a fixed sampled prefix dataset too:
 
-  prefix_x.npy uint16[num_examples, context_moves, seq_len]
+  prefix_x.npy uint16[num_examples, context_plies, seq_len]
   prefix_y.npy int64[num_examples]
   prefix_meta.jsonl
 """
@@ -136,7 +136,7 @@ def pgn_game_to_packets(game_text: str, tokenizer: ChessTokenizer, seq_len: int)
             break
         ids = tokenizer.encode_tokens(move_tokens)
         if len(ids) > seq_len:
-            raise ValueError(f"move packet exceeds seq_len={seq_len}: {move_tokens}")
+            raise ValueError(f"ply packet exceeds seq_len={seq_len}: {move_tokens}")
         rows.append(ids + [pad_id] * (seq_len - len(ids)))
 
     if not rows:
@@ -207,21 +207,21 @@ def write_game_store(
     moves = np.concatenate(all_moves, axis=0) if all_moves else np.empty((0, seq_len), dtype=np.uint16)
     offsets_arr = np.asarray(offsets, dtype=np.int64)
     results_arr = np.asarray(results, dtype=np.int64)
-    game_lengths = np.diff(offsets_arr) if len(offsets_arr) > 1 else np.asarray([], dtype=np.int64)
+    game_lengths_plies = np.diff(offsets_arr) if len(offsets_arr) > 1 else np.asarray([], dtype=np.int64)
     result_counts = {LABEL_TO_RESULT[i]: int((results_arr == i).sum()) for i in sorted(LABEL_TO_RESULT)}
     source_counts = {str(path): source_files.count(str(path)) for path in inputs}
     length_stats = {
-        "min": int(game_lengths.min()) if len(game_lengths) else 0,
-        "max": int(game_lengths.max()) if len(game_lengths) else 0,
-        "mean": float(game_lengths.mean()) if len(game_lengths) else 0.0,
-        "median": float(np.median(game_lengths)) if len(game_lengths) else 0.0,
-        "p10": float(np.percentile(game_lengths, 10)) if len(game_lengths) else 0.0,
-        "p90": float(np.percentile(game_lengths, 90)) if len(game_lengths) else 0.0,
+        "min": int(game_lengths_plies.min()) if len(game_lengths_plies) else 0,
+        "max": int(game_lengths_plies.max()) if len(game_lengths_plies) else 0,
+        "mean": float(game_lengths_plies.mean()) if len(game_lengths_plies) else 0.0,
+        "median": float(np.median(game_lengths_plies)) if len(game_lengths_plies) else 0.0,
+        "p10": float(np.percentile(game_lengths_plies, 10)) if len(game_lengths_plies) else 0.0,
+        "p90": float(np.percentile(game_lengths_plies, 90)) if len(game_lengths_plies) else 0.0,
     }
 
     if progress:
         print("dataset stats:")
-        print(json.dumps({"result_counts": result_counts, "game_length_moves": length_stats, "source_counts": source_counts}, indent=2))
+        print(json.dumps({"result_counts": result_counts, "game_length_plies": length_stats, "source_counts": source_counts}, indent=2))
         print(f"writing arrays to {out_dir}")
     np.save(out_dir / "moves.npy", moves)
     np.save(out_dir / "offsets.npy", offsets_arr)
@@ -235,7 +235,7 @@ def write_game_store(
         "offsets_path": str(out_dir / "offsets.npy"),
         "results_path": str(out_dir / "results.npy"),
         "num_games": int(len(results_arr)),
-        "total_moves": int(len(moves)),
+        "total_plies": int(len(moves)),
         "moves_shape": list(moves.shape),
         "offsets_shape": list(offsets_arr.shape),
         "results_shape": list(results_arr.shape),
@@ -253,7 +253,7 @@ def write_game_store(
         "stats": {
             "result_counts": result_counts,
             "source_counts": source_counts,
-            "game_length_moves": length_stats,
+            "game_length_plies": length_stats,
         },
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
@@ -261,19 +261,19 @@ def write_game_store(
     return manifest
 
 
-def bucket_to_prefix_range(num_moves: int, bucket: PrefixBucket, mode: BucketMode) -> tuple[int, int] | None:
-    if num_moves <= 0:
+def bucket_to_prefix_range(num_plies: int, bucket: PrefixBucket, mode: BucketMode) -> tuple[int, int] | None:
+    if num_plies <= 0:
         return None
     if mode == "absolute":
         lo = int(bucket.lo)
-        hi = int(min(bucket.hi, num_moves))
+        hi = int(min(bucket.hi, num_plies))
     elif mode == "fraction":
-        lo = max(1, int(num_moves * bucket.lo) + 1)
-        hi = max(lo, int(num_moves * bucket.hi))
-        hi = min(hi, num_moves)
+        lo = max(1, int(num_plies * bucket.lo) + 1)
+        hi = max(lo, int(num_plies * bucket.hi))
+        hi = min(hi, num_plies)
     else:
         raise ValueError(f"unknown bucket mode: {mode}")
-    if lo > num_moves or hi < lo:
+    if lo > num_plies or hi < lo:
         return None
     return lo, hi
 
@@ -289,18 +289,18 @@ def weighted_choice(items, weights, rng: random.Random):
     return items[-1]
 
 
-def sample_prefix_length(num_moves: int, rng: random.Random, buckets: list[PrefixBucket], mode: BucketMode) -> tuple[int, str]:
-    valid = [b for b in buckets if bucket_to_prefix_range(num_moves, b, mode) is not None]
+def sample_prefix_length(num_plies: int, rng: random.Random, buckets: list[PrefixBucket], mode: BucketMode) -> tuple[int, str]:
+    valid = [b for b in buckets if bucket_to_prefix_range(num_plies, b, mode) is not None]
     if not valid:
-        return rng.randint(1, num_moves), "fallback_any"
+        return rng.randint(1, num_plies), "fallback_any"
     bucket = weighted_choice(valid, [b.weight for b in valid], rng)
-    lo, hi = bucket_to_prefix_range(num_moves, bucket, mode)  # type: ignore[misc]
+    lo, hi = bucket_to_prefix_range(num_plies, bucket, mode)  # type: ignore[misc]
     return rng.randint(lo, hi), bucket.name
 
 
 def materialize_prefix_examples(
     out_dir: Path,
-    context_moves: int,
+    context_plies: int,
     prefixes_per_game: int,
     mode: BucketMode,
     seed: int,
@@ -316,7 +316,7 @@ def materialize_prefix_examples(
     rng = random.Random(seed)
 
     n = len(results) * prefixes_per_game
-    x = np.lib.format.open_memmap(out_dir / "prefix_x.npy", mode="w+", dtype=np.uint16, shape=(n, context_moves, seq_len))
+    x = np.lib.format.open_memmap(out_dir / "prefix_x.npy", mode="w+", dtype=np.uint16, shape=(n, context_plies, seq_len))
     y = np.lib.format.open_memmap(out_dir / "prefix_y.npy", mode="w+", dtype=np.int64, shape=(n,))
     bucket_counts: dict[str, int] = {}
     prefix_lengths: list[int] = []
@@ -328,16 +328,16 @@ def materialize_prefix_examples(
         for game_i, label in game_iter:
             start = int(offsets[game_i])
             end = int(offsets[game_i + 1])
-            num_moves = end - start
+            num_plies = end - start
             for _ in range(prefixes_per_game):
-                t, bucket_name = sample_prefix_length(num_moves, rng, buckets, mode)
+                t, bucket_name = sample_prefix_length(num_plies, rng, buckets, mode)
                 prefix_start = start
                 prefix_end = start + t
                 prefix = moves[prefix_start:prefix_end]
-                if len(prefix) >= context_moves:
-                    arr = prefix[-context_moves:]
+                if len(prefix) >= context_plies:
+                    arr = prefix[-context_plies:]
                 else:
-                    pad_rows = np.full((context_moves - len(prefix), seq_len), pad_id, dtype=np.uint16)
+                    pad_rows = np.full((context_plies - len(prefix), seq_len), pad_id, dtype=np.uint16)
                     arr = np.concatenate([pad_rows, prefix], axis=0)
                 x[row] = arr
                 y[row] = int(label)
@@ -354,7 +354,7 @@ def materialize_prefix_examples(
     prefix_length_arr = np.asarray(prefix_lengths, dtype=np.int64)
     prefix_stats = {
         "bucket_counts": bucket_counts,
-        "prefix_length_moves": {
+        "prefix_length_plies": {
             "min": int(prefix_length_arr.min()) if len(prefix_length_arr) else 0,
             "max": int(prefix_length_arr.max()) if len(prefix_length_arr) else 0,
             "mean": float(prefix_length_arr.mean()) if len(prefix_length_arr) else 0.0,
@@ -372,9 +372,9 @@ def materialize_prefix_examples(
         "prefix_x_path": str(out_dir / "prefix_x.npy"),
         "prefix_y_path": str(out_dir / "prefix_y.npy"),
         "prefix_meta_path": str(meta_path),
-        "shape_x": [n, context_moves, seq_len],
+        "shape_x": [n, context_plies, seq_len],
         "shape_y": [n],
-        "context_moves": context_moves,
+        "context_plies": context_plies,
         "prefixes_per_game": prefixes_per_game,
         "bucket_mode": mode,
         "seed": seed,
@@ -391,7 +391,7 @@ def main() -> int:
     parser.add_argument("--seq-len", type=int, default=8)
     parser.add_argument("--max-games", type=int, default=0, help="Debug limit; 0 means all games")
     parser.add_argument("--materialize-prefixes", action="store_true")
-    parser.add_argument("--context-moves", type=int, default=128)
+    parser.add_argument("--context-plies", type=int, default=128)
     parser.add_argument("--prefixes-per-game", type=int, default=1)
     parser.add_argument("--bucket-mode", choices=["fraction", "absolute"], default="fraction")
     parser.add_argument("--seed", type=int, default=0)
@@ -417,12 +417,12 @@ def main() -> int:
         workers=workers,
         chunksize=args.chunksize,
     )
-    print(json.dumps({k: manifest[k] for k in ["num_games", "total_moves", "moves_shape", "skipped"]}, indent=2))
+    print(json.dumps({k: manifest[k] for k in ["num_games", "total_plies", "moves_shape", "skipped"]}, indent=2))
 
     if args.materialize_prefixes:
         prefix_manifest = materialize_prefix_examples(
             args.out_dir,
-            context_moves=args.context_moves,
+            context_plies=args.context_plies,
             prefixes_per_game=args.prefixes_per_game,
             mode=args.bucket_mode,
             seed=args.seed,

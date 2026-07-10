@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Convert PGN movetext into fixed-width move-token ID arrays.
+"""Convert PGN movetext into fixed-width ply-token ID arrays.
 
-Output is a .npy array shaped [num_moves, seq_len], dtype uint16.
-Each row is one complete move packet padded with <PAD>, e.g.:
+Output is a .npy array shaped [num_plies, seq_len], dtype uint16.
+Each row is one complete ply packet padded with <PAD>, e.g.:
   Nbd7 -> [PIECE_N, SRC_FILE_b, TO_d7, <EOM>, <PAD>, ...]
 
 This is a notation-token training table, not board-state/legal-move data.
@@ -49,24 +49,24 @@ def iter_game_movetext(path: Path):
             yield "".join(lines)
 
 
-def iter_move_rows(paths: list[Path], tokenizer: ChessTokenizer, seq_len: int):
+def iter_ply_rows(paths: list[Path], tokenizer: ChessTokenizer, seq_len: int):
     pad_id = tokenizer.token_to_id["<PAD>"]
     for path in paths:
         for movetext in iter_game_movetext(path):
             tokens = tokenize_movetext(movetext, include_turn_tokens=True)
-            for move_tokens in split_token_moves(tokens):
-                # Results are game labels, not move packets for this table.
-                if move_tokens and move_tokens[0].startswith("RESULT_"):
+            for ply_tokens in split_token_moves(tokens):
+                # Results are game labels, not ply packets for this table.
+                if ply_tokens and ply_tokens[0].startswith("RESULT_"):
                     continue
-                ids = tokenizer.encode_tokens(move_tokens)
+                ids = tokenizer.encode_tokens(ply_tokens)
                 if len(ids) > seq_len:
-                    raise ValueError(f"Move packet exceeds seq_len={seq_len}: {move_tokens}")
+                    raise ValueError(f"Ply packet exceeds seq_len={seq_len}: {ply_tokens}")
                 yield ids + [pad_id] * (seq_len - len(ids))
 
 
 def count_rows(paths: list[Path], tokenizer: ChessTokenizer, seq_len: int, limit: int = 0) -> int:
     count = 0
-    for _ in iter_move_rows(paths, tokenizer, seq_len):
+    for _ in iter_ply_rows(paths, tokenizer, seq_len):
         count += 1
         if limit and count >= limit:
             break
@@ -78,7 +78,7 @@ def main() -> int:
     parser.add_argument("inputs", nargs="*", type=Path, default=DEFAULT_INPUTS)
     parser.add_argument("--output", "-o", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--seq-len", type=int, default=8)
-    parser.add_argument("--limit-moves", type=int, default=0, help="Smoke-test limit; 0 means all moves")
+    parser.add_argument("--limit-plies", type=int, default=0, help="Smoke-test limit; 0 means all plies")
     parser.add_argument("--count-only", action="store_true")
     args = parser.parse_args()
 
@@ -87,16 +87,16 @@ def main() -> int:
         raise SystemExit("Missing input(s): " + ", ".join(str(p) for p in missing))
 
     tokenizer = ChessTokenizer()
-    n_rows = count_rows(args.inputs, tokenizer, args.seq_len, args.limit_moves)
-    print(f"move rows: {n_rows:,}")
+    n_rows = count_rows(args.inputs, tokenizer, args.seq_len, args.limit_plies)
+    print(f"ply rows: {n_rows:,}")
     if args.count_only:
         return 0
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     arr = np.lib.format.open_memmap(args.output, mode="w+", dtype=np.uint16, shape=(n_rows, args.seq_len))
 
-    for i, row in enumerate(iter_move_rows(args.inputs, tokenizer, args.seq_len)):
-        if args.limit_moves and i >= args.limit_moves:
+    for i, row in enumerate(iter_ply_rows(args.inputs, tokenizer, args.seq_len)):
+        if args.limit_plies and i >= args.limit_plies:
             break
         arr[i] = row
         if i and i % 1_000_000 == 0:

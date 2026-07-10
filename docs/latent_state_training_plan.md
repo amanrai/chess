@@ -22,7 +22,7 @@ Training with full-game samples already shows strong early signal. If the verifi
 
 This validates:
 
-- the move-history encoder
+- the ply-history encoder
 - the Q-former latent bottleneck
 - the result/value prediction head
 - the idea that the latent state carries meaningful chess information
@@ -59,7 +59,7 @@ Initial command shape:
 uv run python scripts/train_encoder_q.py \
   --batch-size 8 \
   --sample-mode full \
-  --max-game-moves 200 \
+  --max-game-plies 200 \
   --model-dim 256 \
   --heads 16 \
   --grad-accum-steps 16
@@ -72,15 +72,15 @@ uv run python scripts/train_encoder_q.py \
   --batch-size 32 \
   --sample-mode prefix \
   --prefix-fraction 0.5 \
-  --context-moves 125 \
-  --min-game-moves 100 \
-  --max-game-moves 250 \
+  --context-plies 125 \
+  --min-game-plies 100 \
+  --max-game-plies 250 \
   --model-dim 256 \
   --heads 16 \
   --grad-accum-steps 16
 ```
 
-For interpretation, prefix experiments should prefer percentage-based prefixes over fixed context-only controls. `--context-moves` is only the model window; it does not define how much of the original game is sampled. A half-game probe should explicitly set `--prefix-fraction 0.5`, then set `--context-moves` large enough to avoid truncating the sampled half-game prefix.
+For interpretation, prefix experiments should prefer percentage-based prefixes over fixed context-only controls. `--context-plies` is only the model window; it does not define how much of the original game is sampled. A half-game probe should explicitly set `--prefix-fraction 0.5`, then set `--context-plies` large enough to avoid truncating the sampled half-game prefix.
 
 ## Phase 2: contrastive trajectory training
 

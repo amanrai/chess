@@ -82,7 +82,7 @@ def save_checkpoint(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data" / "processed" / "lumbras" / "verifier")
-    parser.add_argument("--context-moves", type=int, default=128)
+    parser.add_argument("--context-plies", type=int, default=128)
     parser.add_argument("--sample-mode", choices=["prefix", "full"], default="prefix")
     parser.add_argument(
         "--bucket-mode",
@@ -91,16 +91,16 @@ def main() -> int:
         help="Prefix sampling buckets used when --sample-mode prefix",
     )
     parser.add_argument(
-        "--min-game-moves",
+        "--min-game-plies",
         type=int,
         default=None,
-        help="Exclude games with fewer than this many move packets/plies before sampling",
+        help="Exclude games with fewer than this many plies before sampling",
     )
     parser.add_argument(
-        "--max-game-moves",
+        "--max-game-plies",
         type=int,
         default=None,
-        help="Exclude games with more than this many move packets/plies before sampling",
+        help="Exclude games with more than this many plies before sampling",
     )
     parser.add_argument(
         "--prefix-fraction",
@@ -146,12 +146,12 @@ def main() -> int:
 
     dataset = VerifierGameStoreDataset(
         args.data_dir,
-        context_moves=args.context_moves,
+        context_plies=args.context_plies,
         examples_per_epoch=args.examples_per_epoch,
         sample_mode=args.sample_mode,
         bucket_mode=args.bucket_mode,
-        min_game_moves=args.min_game_moves,
-        max_game_moves=args.max_game_moves,
+        min_game_plies=args.min_game_plies,
+        max_game_plies=args.max_game_plies,
         prefix_fraction=args.prefix_fraction,
         prefix_fraction_min=args.prefix_fraction_min,
         prefix_fraction_max=args.prefix_fraction_max,
@@ -164,9 +164,9 @@ def main() -> int:
         f"bucket_mode={args.bucket_mode} "
         f"prefix_fraction={args.prefix_fraction} "
         f"prefix_fraction_range=({args.prefix_fraction_min}, {args.prefix_fraction_max}) "
-        f"context_moves={args.context_moves} "
-        f"min_game_moves={args.min_game_moves} "
-        f"max_game_moves={args.max_game_moves}"
+        f"context_plies={args.context_plies} "
+        f"min_game_plies={args.min_game_plies} "
+        f"max_game_plies={args.max_game_plies}"
     )
     loader = DataLoader(
         dataset,
@@ -178,7 +178,7 @@ def main() -> int:
 
     model = QVerifierTransformer(
         vocab_size=len(VOCAB),
-        move_expr=8,
+        ply_expr=8,
         model_dim=args.model_dim,
         heads=args.heads,
         history_layers=args.history_layers,

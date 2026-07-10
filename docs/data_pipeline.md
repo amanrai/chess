@@ -88,7 +88,7 @@ data/processed/lumbras/verifier/sources.json
 Meaning:
 
 ```text
-moves.npy    uint16[total_moves, 8]
+moves.npy    uint16[total_plies, 8]  # filename is historical; rows are plies
 offsets.npy  int64[num_games + 1]
 results.npy  int64[num_games]
 ```
@@ -114,19 +114,19 @@ workers/chunksize used
 ## 4. Optional: materialize sampled verifier prefixes
 
 Normally we sample prefixes dynamically during training from `moves.npy + offsets.npy + results.npy`.
-The dynamic Q-verifier trainer supports controlled percentage-based prefixes, e.g. `--prefix-fraction 0.5`, plus game-length filters like `--min-game-moves` and `--max-game-moves`.
+The dynamic Q-verifier trainer supports controlled percentage-based prefixes, e.g. `--prefix-fraction 0.5`, plus game-length filters like `--min-game-plies` and `--max-game-plies`.
 
 Important distinction:
 
 - prefix fraction / prefix length: how much of the original game is sampled
-- context moves: how many sampled move packets the model can see after crop/pad
+- context plies: how many sampled ply packets the model can see after crop/pad
 
 Use percentage-based prefixes for interpretable partial-game probes. A fixed context window by itself can include whole short games.
 
 If you want a fixed prefix dataset:
 
 ```bash
-uv run python scripts/preprocess_verifier_dataset.py --materialize-prefixes --context-moves 128 --prefixes-per-game 4
+uv run python scripts/preprocess_verifier_dataset.py --materialize-prefixes --context-plies 128 --prefixes-per-game 4
 ```
 
 Expected extra files:
@@ -149,7 +149,7 @@ uv run python scripts/preprocess_verifier_dataset.py --max-games 100
 Optional fixed prefixes on a small debug set:
 
 ```bash
-uv run python scripts/preprocess_verifier_dataset.py --max-games 100 --materialize-prefixes --context-moves 64 --prefixes-per-game 2
+uv run python scripts/preprocess_verifier_dataset.py --max-games 100 --materialize-prefixes --context-plies 64 --prefixes-per-game 2
 ```
 
 ## Important notes

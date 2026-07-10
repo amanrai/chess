@@ -13,7 +13,7 @@ We have implemented and tested a reusable tokenizer/detokenizer in:
 - `scripts/tokenize_move.py`
 - `notebooks/chess_tokenizer.ipynb`
 
-We have **not** run full dataset tokenization yet. That is intentional: the network design may change how examples are packed, how context is represented, and whether the output head predicts a move packet, a flattened sequence, or something more structured.
+We have **not** run full dataset tokenization yet. That is intentional: the network design may change how examples are packed, how context is represented, and whether the output head predicts a ply packet, a flattened sequence, or something more structured.
 
 ## What is being tokenized
 
@@ -27,7 +27,7 @@ PGN metadata lines such as:
 [WhiteElo "2830"]
 ```
 
-are not part of the core move-token stream.
+are not part of the core ply-token stream.
 
 The current tokenizer is a **notation codec**:
 
@@ -63,7 +63,7 @@ Instead, we use compositional move tokens. This keeps the vocabulary small while
 
 ## Core representation
 
-Each SAN move becomes a variable-length **move packet** ending in `<EOM>`.
+Each SAN ply (one side's move) becomes a variable-length **ply packet** ending in `<EOM>`.
 
 For model convenience, packets are currently padded to a fixed length:
 
@@ -85,20 +85,20 @@ O-O       -> CASTLE_KINGSIDE <EOM> <PAD> <PAD> <PAD> <PAD> <PAD> <PAD>
 O-O-O#    -> CASTLE_QUEENSIDE MATE <EOM> <PAD> <PAD> <PAD> <PAD> <PAD>
 ```
 
-A full game can then be represented as a sequence of move packets:
+A full game can then be represented as a sequence of ply packets:
 
 ```text
-[num_moves, 8]
+[num_plies, 8]
 ```
 
 For batched training examples:
 
 ```text
-x: [batch, context_moves, 8]
+x: [batch, context_plies, 8]
 y: [batch, 8]
 ```
 
-where `x` is a context window of previous move packets and `y` is the next move packet.
+where `x` is a context window of previous ply packets and `y` is the next ply packet.
 
 ## Token categories
 
@@ -123,9 +123,9 @@ Important current ids:
 <EOM> = 6
 ```
 
-`<PAD>` fills unused slots in a fixed-width move packet.
+`<PAD>` fills unused slots in a fixed-width ply packet.
 
-`<EOM>` marks the end of the real move. This is important because move packets are variable-length semantically but fixed-length physically.
+`<EOM>` marks the end of the real move. This is important because ply packets are variable-length semantically but fixed-length physically.
 
 ### Turn tokens
 
@@ -315,7 +315,7 @@ The tokenizer supports round-tripping:
 SAN -> tokens -> ids -> tokens -> SAN
 ```
 
-The detokenizer reconstructs canonical SAN from a single move packet. It ignores:
+The detokenizer reconstructs canonical SAN from a single ply packet. It ignores:
 
 - `<PAD>`
 - `<EOM>`
@@ -331,19 +331,19 @@ Examples:
 
 ## How this might feed a network
 
-The current leading idea is that the model predicts a whole next-move packet, not a single monolithic move id.
+The current leading idea is that the model predicts a whole next-ply packet, not a single monolithic move id.
 
 A simple training item could be:
 
 ```text
-x = previous K move packets: [K, 8]
-y = next move packet:        [8]
+x = previous K ply packets: [K, 8]
+y = next ply packet:        [8]
 ```
 
 Batch shape:
 
 ```text
-x: [batch, context_moves, 8]
+x: [batch, context_plies, 8]
 y: [batch, 8]
 ```
 
@@ -390,7 +390,7 @@ Although `scripts/tokenize_pgn_dataset.py` exists and has been smoke-tested, we 
 
 Open design questions for the network may affect dataset packing:
 
-1. Are examples move-level, game-level, or fixed-length chunks of flattened packets?
+1. Are examples ply-level, game-level, or fixed-length chunks of flattened packets?
 2. Does the model see side-to-move as explicit `WHITE` / `BLACK` tokens or as a separate feature?
 3. Does the output head predict all 8 slots jointly or sequentially?
 4. Do we include game boundary tokens?
