@@ -171,6 +171,13 @@ def accuracy(logits: torch.Tensor, y: torch.Tensor) -> float:
     return float((logits.argmax(dim=-1) == y).float().mean().detach().cpu())
 
 
+def linear_decay(start: float, end: float, step: int, decay_steps: int) -> float:
+    if decay_steps <= 0:
+        return end
+    progress = min(max(step, 0) / decay_steps, 1.0)
+    return start + (end - start) * progress
+
+
 def format_table(headers: list[str], rows: list[list[str]]) -> str:
     widths = [len(header) for header in headers]
     for row in rows:
@@ -282,7 +289,9 @@ def main() -> int:
         help="Save an in-epoch snapshot every N batches; 0 disables",
     )
     parser.add_argument("--log-window", type=int, default=1000)
-    parser.add_argument("--check-positive-weight", type=float, default=20.0, help="Class weight for positive CHECK labels in check loss")
+    parser.add_argument("--check-positive-weight", type=float, default=20.0, help="Initial class weight for positive CHECK labels in check loss")
+    parser.add_argument("--check-positive-weight-end", type=float, default=1.0, help="Final positive CHECK class weight after decay")
+    parser.add_argument("--check-positive-weight-decay-batches", type=int, default=150_000, help="Linearly decay CHECK positive class weight over this many total batches; 0 jumps to final weight")
     parser.add_argument("--mate-positive-weight", type=float, default=50.0, help="Class weight for positive MATE labels in mate loss")
     parser.add_argument("--wandb", action="store_true", help="Log metrics to Weights & Biases")
     parser.add_argument("--wandb-project", type=str, default="chess-gm")
@@ -298,6 +307,10 @@ def main() -> int:
         raise ValueError("--snapshot-every-batches must be >= 0")
     if args.check_positive_weight <= 0:
         raise ValueError("--check-positive-weight must be > 0")
+    if args.check_positive_weight_end <= 0:
+        raise ValueError("--check-positive-weight-end must be > 0")
+    if args.check_positive_weight_decay_batches < 0:
+        raise ValueError("--check-positive-weight-decay-batches must be >= 0")
     if args.mate_positive_weight <= 0:
         raise ValueError("--mate-positive-weight must be > 0")
 
@@ -341,11 +354,11 @@ def main() -> int:
     model = model.to(args.device)
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    check_loss_weight = torch.tensor([1.0, args.check_positive_weight], dtype=torch.float32, device=args.device)
     mate_loss_weight = torch.tensor([1.0, args.mate_positive_weight], dtype=torch.float32, device=args.device)
     print(
         "loss weights: "
-        f"check=[neg=1.0,pos={args.check_positive_weight:g}] "
+        f"check=[neg=1.0,pos={args.check_positive_weight:g}->{args.check_positive_weight_end:g} "
+        f"over {args.check_positive_weight_decay_batches:,} batches] "
         f"mate=[neg=1.0,pos={args.mate_positive_weight:g}] "
         "turn=[neg=1.0,pos=1.0]"
     )
@@ -399,6 +412,13 @@ def main() -> int:
             check_y = check_y.to(args.device, non_blocking=True)
             mate_y = mate_y.to(args.device, non_blocking=True)
             turn_y = turn_y.to(args.device, non_blocking=True)
+            current_check_positive_weight = linear_decay(
+                args.check_positive_weight,
+                args.check_positive_weight_end,
+                global_batch - 1,
+                args.check_positive_weight_decay_batches,
+            )
+            check_loss_weight = torch.tensor([1.0, current_check_positive_weight], dtype=torch.float32, device=args.device)
             check_logits, mate_logits, turn_logits = model(x)
             check_loss = F.cross_entropy(check_logits, check_y, weight=check_loss_weight)
             mate_loss = F.cross_entropy(mate_logits, mate_y, weight=mate_loss_weight)
@@ -529,7 +549,9 @@ def main() -> int:
                     "train/black_tp": black_tp,
                     "train/turn_correct": sum(turn_correct_window),
                     "train/n": sum(sample_count_window),
-                    "loss_weight/check_positive": args.check_positive_weight,
+                    "loss_weight/check_positive": current_check_positive_weight,
+                    "loss_weight/check_positive_start": args.check_positive_weight,
+                    "loss_weight/check_positive_end": args.check_positive_weight_end,
                     "loss_weight/mate_positive": args.mate_positive_weight,
                     "epoch": epoch + 1,
                     "batch": step,
