@@ -214,6 +214,29 @@ def init_wandb(args: argparse.Namespace):
     )
 
 
+def save_checkpoint(
+    path: Path,
+    model: nn.Module,
+    opt: torch.optim.Optimizer,
+    args: argparse.Namespace,
+    epoch: int,
+    batch: int,
+    global_batch: int,
+) -> None:
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "optimizer": opt.state_dict(),
+            "args": vars(args),
+            "vocab": VOCAB,
+            "epoch": epoch,
+            "batch": batch,
+            "global_batch": global_batch,
+        },
+        path,
+    )
+
+
 def load_encoder_checkpoint(model: QPlyProbeTransformer, path: Path) -> None:
     ckpt = torch.load(path, map_location="cpu")
     state = ckpt.get("model", ckpt)
@@ -252,6 +275,12 @@ def main() -> int:
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--init-checkpoint", type=Path, default=None, help="Optional q-verifier checkpoint to initialize the shared encoder")
     parser.add_argument("--checkpoint-dir", type=Path, default=ROOT / "checkpoints" / "q_probe")
+    parser.add_argument(
+        "--snapshot-every-batches",
+        type=int,
+        default=5000,
+        help="Save an in-epoch snapshot every N batches; 0 disables",
+    )
     parser.add_argument("--log-window", type=int, default=1000)
     parser.add_argument("--wandb", action="store_true", help="Log metrics to Weights & Biases")
     parser.add_argument("--wandb-project", type=str, default="chess-gm")
@@ -263,6 +292,8 @@ def main() -> int:
         raise ValueError("--grad-accum-steps must be >= 1")
     if args.bucket_plies < 1:
         raise ValueError("--bucket-plies must be >= 1")
+    if args.snapshot_every_batches < 0:
+        raise ValueError("--snapshot-every-batches must be >= 0")
 
     wandb_run = init_wandb(args)
 
@@ -306,6 +337,7 @@ def main() -> int:
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+    global_batch = 0
     for epoch in range(args.epochs):
         model.train()
         opt.zero_grad(set_to_none=True)
@@ -348,6 +380,7 @@ def main() -> int:
         bucket_count: dict[int, int] = {}
         pbar = tqdm(loader, desc=f"q-probe epoch {epoch + 1}/{args.epochs}", unit="batch")
         for step, (x, check_y, mate_y, turn_y, probe_ply) in enumerate(pbar, start=1):
+            global_batch += 1
             x = x.to(args.device, non_blocking=True)
             check_y = check_y.to(args.device, non_blocking=True)
             mate_y = mate_y.to(args.device, non_blocking=True)
@@ -630,15 +663,28 @@ def main() -> int:
                 bucket_turn_correct.clear()
                 bucket_count.clear()
 
+            if args.snapshot_every_batches and step % args.snapshot_every_batches == 0:
+                snapshot_path = args.checkpoint_dir / f"q_probe_epoch_{epoch + 1:03d}_batch_{step:06d}.pt"
+                save_checkpoint(
+                    snapshot_path,
+                    model=model,
+                    opt=opt,
+                    args=args,
+                    epoch=epoch + 1,
+                    batch=step,
+                    global_batch=global_batch,
+                )
+                pbar.write(f"saved snapshot: {snapshot_path}")
+
         ckpt_path = args.checkpoint_dir / f"q_probe_epoch_{epoch + 1}.pt"
-        torch.save(
-            {
-                "model": model.state_dict(),
-                "args": vars(args),
-                "vocab": VOCAB,
-                "epoch": epoch + 1,
-            },
+        save_checkpoint(
             ckpt_path,
+            model=model,
+            opt=opt,
+            args=args,
+            epoch=epoch + 1,
+            batch=len(loader),
+            global_batch=global_batch,
         )
 
     return 0
