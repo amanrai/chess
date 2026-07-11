@@ -13,6 +13,7 @@ SKIP_APT="${SKIP_APT:-0}"
 SKIP_DOWNLOAD="${SKIP_DOWNLOAD:-0}"
 SKIP_EXTRACT="${SKIP_EXTRACT:-0}"
 SKIP_PREPROCESS="${SKIP_PREPROCESS:-0}"
+WANDB="${WANDB:-auto}"
 
 usage() {
   cat <<'EOF'
@@ -28,6 +29,7 @@ Options:
   --skip-download              Do not download Lumbras archives
   --skip-extract               Do not extract/split Lumbras PGNs
   --skip-preprocess            Do not build verifier game store
+  --wandb {auto|1|0}           Enable W&B for probe run. auto uses .env wandb_key or WANDB_API_KEY
   -h, --help                   Show this help
 
 Environment overrides:
@@ -35,6 +37,7 @@ Environment overrides:
   WORKERS=N
   CHUNKSIZE=N
   SKIP_APT=1 SKIP_SYNC=1 SKIP_DOWNLOAD=1 SKIP_EXTRACT=1 SKIP_PREPROCESS=1
+  WANDB=auto|1|0
 
 Default probe command after preprocessing:
   uv run python scripts/train_encoder_q_probe.py --batch-size 32 --context-plies 125 --max-probe-plies 250 --bucket-plies 25 --model-dim 256 --heads 16 --grad-accum-steps 16
@@ -54,6 +57,7 @@ while [[ $# -gt 0 ]]; do
     --skip-download) SKIP_DOWNLOAD=1; shift ;;
     --skip-extract) SKIP_EXTRACT=1; shift ;;
     --skip-preprocess) SKIP_PREPROCESS=1; shift ;;
+    --wandb) WANDB="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -61,6 +65,18 @@ done
 
 log() { printf '\n\033[36m==> %s\033[0m\n' "$*"; }
 run() { printf '+ %q ' "$@"; printf '\n'; "$@"; }
+
+wandb_args=()
+case "$WANDB" in
+  1|true|yes) wandb_args=(--wandb) ;;
+  0|false|no) wandb_args=() ;;
+  auto)
+    if [[ -n "${WANDB_API_KEY:-}" ]] || grep -qE '^wandb_key=' .env 2>/dev/null; then
+      wandb_args=(--wandb)
+    fi
+    ;;
+  *) echo "invalid --wandb value: $WANDB (expected auto, 1, or 0)" >&2; exit 2 ;;
+esac
 
 if [[ "$SKIP_APT" != "1" ]]; then
   log "Installing system dependencies"
@@ -108,7 +124,8 @@ case "$RUN_TRAIN" in
       --bucket-plies 25 \
       --model-dim 256 \
       --heads 16 \
-      --grad-accum-steps 16
+      --grad-accum-steps 16 \
+      "${wandb_args[@]}"
     ;;
   qverifier)
     log "Running Q-verifier half-game prefix training"

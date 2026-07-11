@@ -9,5 +9,8 @@ __pycache__/
 *.py[cod]
 .venv/
 
+# Secrets
+.env
+
 # OS/editor
 .DS_Store

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections import deque
 from pathlib import Path
@@ -54,6 +55,34 @@ def rolling_precisions(window: deque[tuple[list[int], list[int]]]) -> dict[str, 
         f"p_{name}": f"{(tp[i] / predicted[i] if predicted[i] else 0.0):.3f} [{tp[i]}/{predicted[i]}]"
         for i, name in enumerate(names)
     }
+
+
+def read_dotenv_key(path: Path = ROOT / ".env", key: str = "wandb_key") -> str | None:
+    if not path.exists():
+        return None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        if name.strip() == key:
+            return value.strip().strip('"').strip("'") or None
+    return None
+
+
+def init_wandb(args: argparse.Namespace):
+    if not args.wandb:
+        return None
+    api_key = os.environ.get("WANDB_API_KEY") or read_dotenv_key()
+    import wandb
+
+    if api_key:
+        wandb.login(key=api_key)
+    return wandb.init(
+        project=args.wandb_project,
+        name=args.wandb_run_name,
+        config={k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
+    )
 
 
 def save_checkpoint(
@@ -142,6 +171,10 @@ def main() -> int:
         help="Save an in-epoch snapshot every N batches; 0 disables",
     )
     parser.add_argument("--log-window", type=int, default=1000)
+    parser.add_argument("--wandb", action="store_true", help="Log metrics to Weights & Biases")
+    parser.add_argument("--wandb-project", type=str, default="chess-gm")
+    parser.add_argument("--wandb-run-name", type=str, default=None)
+    parser.add_argument("--wandb-log-every", type=int, default=100)
     args = parser.parse_args()
 
     dataset = VerifierGameStoreDataset(
@@ -203,6 +236,15 @@ def main() -> int:
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    wandb_run = init_wandb(args)
+    if wandb_run is not None:
+        wandb_run.log(
+            {
+                "params/total_m": total_params / 1e6,
+                "params/trainable_m": trainable_params / 1e6,
+            },
+            step=0,
+        )
 
     global_batch = 0
     for epoch in range(args.epochs):
@@ -232,12 +274,33 @@ def main() -> int:
             precision_window.append(class_precision_counts(logits, y))
             rolling_loss = sum(loss_window) / len(loss_window)
             pbar.set_postfix(loss=rolling_loss)
-            if step % 100 == 0 or step == len(loader):
-                precisions = rolling_precisions(precision_window)
+            should_print = step % 100 == 0 or step == len(loader)
+            should_log_wandb = wandb_run is not None and (
+                step % args.wandb_log_every == 0 or step == len(loader)
+            )
+            current_precisions = rolling_precisions(precision_window) if (should_print or should_log_wandb) else {}
+
+            if should_log_wandb:
+                wandb_run.log(
+                    {
+                        "train/loss": rolling_loss,
+                        "train/acc": sum(acc_window) / len(acc_window),
+                        "epoch": epoch + 1,
+                        "batch": step,
+                        "global_batch": global_batch,
+                        **{
+                            f"train/{key}": float(value.split()[0])
+                            for key, value in current_precisions.items()
+                        },
+                    },
+                    step=global_batch,
+                )
+
+            if should_print:
                 metrics = {
                     "loss": f"{rolling_loss:.4f}",
                     "acc": f"{sum(acc_window) / len(acc_window):.4f}",
-                    **precisions,
+                    **current_precisions,
                 }
                 metrics_text = " ".join(f"{k}={v}" for k, v in metrics.items())
                 cyan = "\033[36m"

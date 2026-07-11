@@ -84,6 +84,10 @@ Defaults are shown in parentheses.
 --snapshot-every-batches INT
                             Save an in-epoch snapshot every N batches; 0 disables (5000)
 --log-window INT            Rolling metric window in batches (1000)
+--wandb                    Enable Weights & Biases logging; reads WANDB_API_KEY or .env wandb_key
+--wandb-project STR         W&B project (chess-gm)
+--wandb-run-name STR        W&B run name (unset)
+--wandb-log-every INT       W&B logging interval in batches (100)
 ```
 
 End-of-epoch checkpoints are written as:
@@ -106,7 +110,7 @@ On a fresh Vast instance, clone the repo and run:
 bash scripts/vast_download_preprocess_run.sh
 ```
 
-Default behavior: install deps, `uv sync`, download Lumbras, extract/split PGNs, preprocess the verifier game store, then start the Q-encoder fact probe.
+Default behavior: install deps, `uv sync`, download Lumbras, extract/split PGNs, preprocess the verifier game store, then start the Q-encoder fact probe. If `.env` contains `wandb_key=...` or `WANDB_API_KEY` is set, the Vast script enables W&B for the probe run automatically.
 
 Useful variants:
 
@@ -161,7 +165,7 @@ The probe samples a random prefix length up to `--max-probe-plies` and predicts:
 - whether the final ply in the prefix resulted in check/mate
 - whose turn it is next
 
-Important: `CHECK` and `MATE` tokens are removed from the input `x` and used only to build the check label, so the model cannot read the answer directly.
+Important: `CHECK` and `MATE` tokens are removed from the input `x` and used only to build the check/mate labels, so the model cannot read the answer directly.
 
 ```bash
 uv run python scripts/train_encoder_q_probe.py \
@@ -169,7 +173,14 @@ uv run python scripts/train_encoder_q_probe.py \
   --context-plies 125 \
   --max-probe-plies 250 \
   --model-dim 256 \
-  --heads 16
+  --heads 16 \
+  --wandb
+```
+
+The probe logs all printed metrics to W&B when `--wandb` is set, including loss splits, accuracies, positive-class probabilities, recalls, raw counts, and per-ply-bucket metrics. It reads the key from `WANDB_API_KEY` or `.env`:
+
+```text
+wandb_key=...
 ```
 
 Optional: initialize the shared encoder from a Q-verifier checkpoint:

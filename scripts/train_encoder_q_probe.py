@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import sys
 from collections import deque
@@ -170,6 +171,34 @@ def accuracy(logits: torch.Tensor, y: torch.Tensor) -> float:
     return float((logits.argmax(dim=-1) == y).float().mean().detach().cpu())
 
 
+def read_dotenv_key(path: Path = ROOT / ".env", key: str = "wandb_key") -> str | None:
+    if not path.exists():
+        return None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        if name.strip() == key:
+            return value.strip().strip('"').strip("'") or None
+    return None
+
+
+def init_wandb(args: argparse.Namespace):
+    if not args.wandb:
+        return None
+    api_key = os.environ.get("WANDB_API_KEY") or read_dotenv_key()
+    import wandb
+
+    if api_key:
+        wandb.login(key=api_key)
+    return wandb.init(
+        project=args.wandb_project,
+        name=args.wandb_run_name,
+        config={k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
+    )
+
+
 def load_encoder_checkpoint(model: QPlyProbeTransformer, path: Path) -> None:
     ckpt = torch.load(path, map_location="cpu")
     state = ckpt.get("model", ckpt)
@@ -209,12 +238,18 @@ def main() -> int:
     parser.add_argument("--init-checkpoint", type=Path, default=None, help="Optional q-verifier checkpoint to initialize the shared encoder")
     parser.add_argument("--checkpoint-dir", type=Path, default=ROOT / "checkpoints" / "q_probe")
     parser.add_argument("--log-window", type=int, default=1000)
+    parser.add_argument("--wandb", action="store_true", help="Log metrics to Weights & Biases")
+    parser.add_argument("--wandb-project", type=str, default="chess-gm")
+    parser.add_argument("--wandb-run-name", type=str, default=None)
+    parser.add_argument("--wandb-log-every", type=int, default=100)
     args = parser.parse_args()
 
     if args.grad_accum_steps < 1:
         raise ValueError("--grad-accum-steps must be >= 1")
     if args.bucket_plies < 1:
         raise ValueError("--bucket-plies must be >= 1")
+
+    wandb_run = init_wandb(args)
 
     dataset = PlyProbeDataset(
         args.data_dir,
@@ -273,6 +308,8 @@ def main() -> int:
         check_pos_window: deque[int] = deque(maxlen=args.log_window)
         mate_tp_window: deque[int] = deque(maxlen=args.log_window)
         mate_pos_window: deque[int] = deque(maxlen=args.log_window)
+        turn_correct_window: deque[int] = deque(maxlen=args.log_window)
+        sample_count_window: deque[int] = deque(maxlen=args.log_window)
         bucket_p_check_sum: dict[int, float] = {}
         bucket_check_correct: dict[int, int] = {}
         bucket_check_positive: dict[int, int] = {}
@@ -322,6 +359,8 @@ def main() -> int:
             check_pos_window.append(int((check_y == 1).sum().detach().cpu()))
             mate_tp_window.append(int(((mate_pred == 1) & (mate_y == 1)).sum().detach().cpu()))
             mate_pos_window.append(int((mate_y == 1).sum().detach().cpu()))
+            turn_correct_window.append(int((turn_pred == turn_y).sum().detach().cpu()))
+            sample_count_window.append(int(x.shape[0]))
             for (
                 bucket,
                 check_prob,
@@ -362,6 +401,57 @@ def main() -> int:
                 bucket_count[bucket] = bucket_count.get(bucket, 0) + 1
             rolling_loss = sum(loss_window) / len(loss_window)
             pbar.set_postfix(loss=rolling_loss)
+            if wandb_run is not None and (step % args.wandb_log_every == 0 or step == len(loader)):
+                check_pos = sum(check_pos_window)
+                mate_pos = sum(mate_pos_window)
+                log_payload = {
+                    "train/loss": rolling_loss,
+                    "train/check_loss": sum(check_loss_window) / len(check_loss_window),
+                    "train/mate_loss": sum(mate_loss_window) / len(mate_loss_window),
+                    "train/turn_loss": sum(turn_loss_window) / len(turn_loss_window),
+                    "train/check_acc": sum(check_acc_window) / len(check_acc_window),
+                    "train/mate_acc": sum(mate_acc_window) / len(mate_acc_window),
+                    "train/turn_acc": sum(turn_acc_window) / len(turn_acc_window),
+                    "train/p_check": sum(p_check_window) / len(p_check_window),
+                    "train/p_mate": sum(p_mate_window) / len(p_mate_window),
+                    "train/p_turn": sum(p_turn_window) / len(p_turn_window),
+                    "train/r_check": sum(check_tp_window) / check_pos if check_pos else 0.0,
+                    "train/r_mate": sum(mate_tp_window) / mate_pos if mate_pos else 0.0,
+                    "train/check_positive": check_pos,
+                    "train/check_tp": sum(check_tp_window),
+                    "train/mate_positive": mate_pos,
+                    "train/mate_tp": sum(mate_tp_window),
+                    "train/turn_correct": sum(turn_correct_window),
+                    "train/n": sum(sample_count_window),
+                    "epoch": epoch + 1,
+                    "batch": step,
+                }
+                for bucket in sorted(bucket_count):
+                    lo = bucket * args.bucket_plies + 1
+                    hi = (bucket + 1) * args.bucket_plies
+                    prefix = f"bucket/{lo}_{hi}"
+                    log_payload[f"{prefix}/p_check"] = bucket_p_check_sum[bucket] / bucket_count[bucket]
+                    log_payload[f"{prefix}/r_check"] = (
+                        bucket_check_tp[bucket] / bucket_check_positive[bucket]
+                        if bucket_check_positive[bucket]
+                        else 0.0
+                    )
+                    log_payload[f"{prefix}/check_positive"] = bucket_check_positive[bucket]
+                    log_payload[f"{prefix}/check_tp"] = bucket_check_tp[bucket]
+                    log_payload[f"{prefix}/p_mate"] = bucket_p_mate_sum[bucket] / bucket_count[bucket]
+                    log_payload[f"{prefix}/r_mate"] = (
+                        bucket_mate_tp[bucket] / bucket_mate_positive[bucket]
+                        if bucket_mate_positive[bucket]
+                        else 0.0
+                    )
+                    log_payload[f"{prefix}/mate_positive"] = bucket_mate_positive[bucket]
+                    log_payload[f"{prefix}/mate_tp"] = bucket_mate_tp[bucket]
+                    log_payload[f"{prefix}/p_black"] = bucket_p_turn_sum[bucket] / bucket_count[bucket]
+                    log_payload[f"{prefix}/turn_acc"] = bucket_turn_correct[bucket] / bucket_count[bucket]
+                    log_payload[f"{prefix}/n"] = bucket_count[bucket]
+                    log_payload[f"{prefix}/turn_correct"] = bucket_turn_correct[bucket]
+                wandb_run.log(log_payload, step=(epoch * len(loader)) + step)
+
             if step % 100 == 0 or step == len(loader):
                 check_pos = sum(check_pos_window)
                 mate_pos = sum(mate_pos_window)

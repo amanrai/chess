@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -10,6 +11,28 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from chessgm.trainer import VerifierTrainConfig, train_verifier  # noqa: E402
+
+
+def read_dotenv_key(path: Path = ROOT / ".env", key: str = "wandb_key") -> str | None:
+    if not path.exists():
+        return None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        if name.strip() == key:
+            return value.strip().strip('"').strip("'") or None
+    return None
+
+
+def maybe_login_wandb() -> None:
+    api_key = os.environ.get("WANDB_API_KEY") or read_dotenv_key()
+    if not api_key:
+        return
+    import wandb
+
+    wandb.login(key=api_key)
 
 
 def main() -> int:
@@ -57,6 +80,8 @@ def main() -> int:
     )
     if args.device is not None:
         config.device = args.device
+    if args.wandb:
+        maybe_login_wandb()
 
     train_verifier(config)
     return 0

@@ -20,7 +20,7 @@ On a fresh Vast instance, clone the repo and run:
 bash scripts/vast_download_preprocess_run.sh
 ```
 
-That script installs system dependencies when `apt-get` is available, installs/syncs `uv`, downloads Lumbras archives, extracts the 2200+ PGN splits, builds the verifier game store, then starts the Q-encoder fact probe.
+That script installs system dependencies when `apt-get` is available, installs/syncs `uv`, downloads Lumbras archives, extracts the 2200+ PGN splits, builds the verifier game store, then starts the Q-encoder fact probe. If `WANDB_API_KEY` is set or `.env` contains `wandb_key=...`, W&B logging is enabled for the probe run.
 
 Useful variants:
 
@@ -36,6 +36,10 @@ bash scripts/vast_download_preprocess_run.sh --skip-download --skip-extract
 
 # Tune preprocessing workers/chunksize.
 bash scripts/vast_download_preprocess_run.sh --workers 32 --chunksize 256
+
+# Force W&B on/off for the probe run.
+bash scripts/vast_download_preprocess_run.sh --wandb 1
+bash scripts/vast_download_preprocess_run.sh --wandb 0
 ```
 
 ## 1. Download Lumbras OTB archives
