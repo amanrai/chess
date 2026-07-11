@@ -1,0 +1,11 @@
+beautifulsoup4>=4.12
+cryptography>=42
+numpy>=2.0
+pandas>=2.2
+requests>=2.32
+torch>=2.4
+tqdm>=4.66
+wandb>=0.17
+
+# Optional/dev convenience. Not required for Vast data prep/training.
+pytest>=8.0
