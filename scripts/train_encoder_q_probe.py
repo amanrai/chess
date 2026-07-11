@@ -282,6 +282,8 @@ def main() -> int:
         help="Save an in-epoch snapshot every N batches; 0 disables",
     )
     parser.add_argument("--log-window", type=int, default=1000)
+    parser.add_argument("--check-positive-weight", type=float, default=20.0, help="Class weight for positive CHECK labels in check loss")
+    parser.add_argument("--mate-positive-weight", type=float, default=50.0, help="Class weight for positive MATE labels in mate loss")
     parser.add_argument("--wandb", action="store_true", help="Log metrics to Weights & Biases")
     parser.add_argument("--wandb-project", type=str, default="chess-gm")
     parser.add_argument("--wandb-run-name", type=str, default=None)
@@ -294,6 +296,10 @@ def main() -> int:
         raise ValueError("--bucket-plies must be >= 1")
     if args.snapshot_every_batches < 0:
         raise ValueError("--snapshot-every-batches must be >= 0")
+    if args.check_positive_weight <= 0:
+        raise ValueError("--check-positive-weight must be > 0")
+    if args.mate_positive_weight <= 0:
+        raise ValueError("--mate-positive-weight must be > 0")
 
     wandb_run = init_wandb(args)
 
@@ -335,6 +341,14 @@ def main() -> int:
     model = model.to(args.device)
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    check_loss_weight = torch.tensor([1.0, args.check_positive_weight], dtype=torch.float32, device=args.device)
+    mate_loss_weight = torch.tensor([1.0, args.mate_positive_weight], dtype=torch.float32, device=args.device)
+    print(
+        "loss weights: "
+        f"check=[neg=1.0,pos={args.check_positive_weight:g}] "
+        f"mate=[neg=1.0,pos={args.mate_positive_weight:g}] "
+        "turn=[neg=1.0,pos=1.0]"
+    )
     args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     global_batch = 0
@@ -386,8 +400,8 @@ def main() -> int:
             mate_y = mate_y.to(args.device, non_blocking=True)
             turn_y = turn_y.to(args.device, non_blocking=True)
             check_logits, mate_logits, turn_logits = model(x)
-            check_loss = F.cross_entropy(check_logits, check_y)
-            mate_loss = F.cross_entropy(mate_logits, mate_y)
+            check_loss = F.cross_entropy(check_logits, check_y, weight=check_loss_weight)
+            mate_loss = F.cross_entropy(mate_logits, mate_y, weight=mate_loss_weight)
             turn_loss = F.cross_entropy(turn_logits, turn_y)
             loss = check_loss + mate_loss + turn_loss
             (loss / args.grad_accum_steps).backward()
@@ -515,6 +529,8 @@ def main() -> int:
                     "train/black_tp": black_tp,
                     "train/turn_correct": sum(turn_correct_window),
                     "train/n": sum(sample_count_window),
+                    "loss_weight/check_positive": args.check_positive_weight,
+                    "loss_weight/mate_positive": args.mate_positive_weight,
                     "epoch": epoch + 1,
                     "batch": step,
                 }
