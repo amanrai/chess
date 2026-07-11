@@ -1,0 +1,432 @@
+#!/usr/bin/env python3
+"""Train Q-encoder probes for basic prefix facts: check and next turn."""
+from __future__ import annotations
+
+import argparse
+import random
+import sys
+from collections import deque
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+from torch import nn
+from torch.utils.data import DataLoader, Dataset
+from tqdm.auto import tqdm
+
+from chessgm.network_q import QFormerPlyHistoryEncoder
+from chessgm.tokenizer import TOKEN_TO_ID, VOCAB
+
+
+class PlyProbeDataset(Dataset):
+    """Sample a random prefix and label final-ply check, mate, and next turn."""
+
+    def __init__(
+        self,
+        root: str | Path,
+        context_plies: int = 128,
+        max_probe_plies: int | None = None,
+        min_game_plies: int | None = None,
+        max_game_plies: int | None = None,
+        examples_per_epoch: int | None = None,
+        seed: int = 0,
+        pad_id: int = 0,
+    ):
+        self.root = Path(root)
+        self.moves = np.load(self.root / "moves.npy", mmap_mode="r")
+        self.offsets = np.load(self.root / "offsets.npy", mmap_mode="r")
+        self.context_plies = context_plies
+        self.max_probe_plies = max_probe_plies
+        self.seed = seed
+        self.pad_id = pad_id
+        self.ply_expr = int(self.moves.shape[1])
+        self.check_id = TOKEN_TO_ID["CHECK"]
+        self.mate_id = TOKEN_TO_ID["MATE"]
+        self.leak_label_ids = {self.check_id, self.mate_id}
+
+        game_lengths_plies = np.diff(self.offsets)
+        valid_mask = game_lengths_plies > 0
+        if min_game_plies is not None:
+            valid_mask &= game_lengths_plies >= min_game_plies
+        if max_game_plies is not None:
+            valid_mask &= game_lengths_plies <= max_game_plies
+        if max_probe_plies is not None:
+            valid_mask &= np.minimum(game_lengths_plies, max_probe_plies) > 0
+        self.game_indices = np.flatnonzero(valid_mask).astype(np.int64)
+        if len(self.game_indices) == 0:
+            raise ValueError("no games left after ply-probe filtering")
+        self.examples_per_epoch = examples_per_epoch or len(self.game_indices)
+
+    def __len__(self) -> int:
+        return self.examples_per_epoch
+
+    def strip_check_mate_tokens(self, prefix: np.ndarray) -> np.ndarray:
+        """Remove CHECK/MATE tokens from each ply and shift remaining tokens left.
+
+        Replacing CHECK/MATE in-place with PAD would leak the suffix position, e.g.
+        `... TO_h5 PAD EOM ...`. This instead produces normal packet structure:
+        `... TO_h5 EOM PAD ...`.
+        """
+        stripped = np.full(prefix.shape, self.pad_id, dtype=prefix.dtype)
+        for row_i, row in enumerate(prefix):
+            kept = [int(token_id) for token_id in row if int(token_id) not in self.leak_label_ids]
+            kept = kept[: self.ply_expr]
+            stripped[row_i, : len(kept)] = kept
+        return stripped
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        rng = random.Random(self.seed + idx)
+        game_i = int(self.game_indices[rng.randrange(len(self.game_indices))])
+        start = int(self.offsets[game_i])
+        end = int(self.offsets[game_i + 1])
+        num_plies = end - start
+        max_t = min(num_plies, self.max_probe_plies) if self.max_probe_plies else num_plies
+        t = rng.randint(1, max_t)
+
+        prefix = self.moves[start : start + t]
+        target_ply = prefix[-1]
+        check = int((target_ply == self.check_id).any() or (target_ply == self.mate_id).any())
+        mate = int((target_ply == self.mate_id).any())
+        next_turn = 1 if t % 2 == 1 else 0  # 0=white, 1=black; after white ply, black moves.
+
+        # Prevent label leakage: CHECK/MATE tokens are targets, never inputs.
+        # Remove them and shift the remaining tokens left instead of leaving a PAD hole.
+        prefix_x = self.strip_check_mate_tokens(prefix)
+
+        if len(prefix_x) >= self.context_plies:
+            x = prefix_x[-self.context_plies :]
+        else:
+            pad_rows = np.full(
+                (self.context_plies - len(prefix_x), self.ply_expr),
+                self.pad_id,
+                dtype=np.uint16,
+            )
+            x = np.concatenate([pad_rows, prefix_x], axis=0)
+
+        return (
+            torch.from_numpy(x.astype(np.int64)),
+            torch.tensor(check, dtype=torch.long),
+            torch.tensor(mate, dtype=torch.long),
+            torch.tensor(next_turn, dtype=torch.long),
+            torch.tensor(t, dtype=torch.long),
+        )
+
+
+class QPlyProbeTransformer(nn.Module):
+    def __init__(
+        self,
+        vocab_size: int,
+        ply_expr: int = 8,
+        model_dim: int = 256,
+        heads: int = 8,
+        history_layers: int = 4,
+        q_layers: int = 2,
+        num_queries: int = 16,
+        dropout: float = 0.0,
+        pad_id: int = 0,
+    ):
+        super().__init__()
+        self.encoder = QFormerPlyHistoryEncoder(
+            vocab_size=vocab_size,
+            ply_expr=ply_expr,
+            model_dim=model_dim,
+            heads=heads,
+            history_layers=history_layers,
+            q_layers=q_layers,
+            num_queries=num_queries,
+            dropout=dropout,
+            pad_id=pad_id,
+        )
+        self.check_head = nn.Sequential(
+            nn.Linear(model_dim, model_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(model_dim, 2),
+        )
+        self.mate_head = nn.Sequential(
+            nn.Linear(model_dim, model_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(model_dim, 2),
+        )
+        self.turn_head = nn.Sequential(
+            nn.Linear(model_dim, model_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(model_dim, 2),
+        )
+
+    def forward(self, x_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        q = self.encoder(x_ids)
+        pooled = q.mean(dim=1)
+        return self.check_head(pooled), self.mate_head(pooled), self.turn_head(pooled)
+
+
+def accuracy(logits: torch.Tensor, y: torch.Tensor) -> float:
+    return float((logits.argmax(dim=-1) == y).float().mean().detach().cpu())
+
+
+def load_encoder_checkpoint(model: QPlyProbeTransformer, path: Path) -> None:
+    ckpt = torch.load(path, map_location="cpu")
+    state = ckpt.get("model", ckpt)
+    model_state = model.state_dict()
+    compatible = {
+        k: v for k, v in state.items() if k.startswith("encoder.") and k in model_state and model_state[k].shape == v.shape
+    }
+    missing, unexpected = model.load_state_dict(compatible, strict=False)
+    print(
+        f"loaded encoder weights from {path}: compatible={len(compatible)} "
+        f"missing={len(missing)} unexpected={len(unexpected)}"
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data-dir", type=Path, default=ROOT / "data" / "processed" / "lumbras" / "verifier")
+    parser.add_argument("--context-plies", type=int, default=128)
+    parser.add_argument("--max-probe-plies", type=int, default=250, help="Sample probe prefix length uniformly from 1..min(game plies, this)")
+    parser.add_argument("--bucket-plies", type=int, default=25, help="Bucket size for per-ply-range p_turn logs")
+    parser.add_argument("--min-game-plies", type=int, default=None)
+    parser.add_argument("--max-game-plies", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--grad-accum-steps", type=int, default=1)
+    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument("--model-dim", type=int, default=256)
+    parser.add_argument("--heads", type=int, default=8)
+    parser.add_argument("--history-layers", type=int, default=4)
+    parser.add_argument("--q-layers", type=int, default=2)
+    parser.add_argument("--num-queries", type=int, default=16)
+    parser.add_argument("--dropout", type=float, default=0.0)
+    parser.add_argument("--examples-per-epoch", type=int, default=None)
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--init-checkpoint", type=Path, default=None, help="Optional q-verifier checkpoint to initialize the shared encoder")
+    parser.add_argument("--checkpoint-dir", type=Path, default=ROOT / "checkpoints" / "q_probe")
+    parser.add_argument("--log-window", type=int, default=1000)
+    args = parser.parse_args()
+
+    if args.grad_accum_steps < 1:
+        raise ValueError("--grad-accum-steps must be >= 1")
+    if args.bucket_plies < 1:
+        raise ValueError("--bucket-plies must be >= 1")
+
+    dataset = PlyProbeDataset(
+        args.data_dir,
+        context_plies=args.context_plies,
+        max_probe_plies=args.max_probe_plies,
+        min_game_plies=args.min_game_plies,
+        max_game_plies=args.max_game_plies,
+        examples_per_epoch=args.examples_per_epoch,
+    )
+    print(
+        "dataset: "
+        f"games={len(dataset.game_indices):,} examples_per_epoch={len(dataset):,} "
+        f"context_plies={args.context_plies} max_probe_plies={args.max_probe_plies} "
+        f"min_game_plies={args.min_game_plies} max_game_plies={args.max_game_plies}"
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=args.device.startswith("cuda"),
+    )
+
+    model = QPlyProbeTransformer(
+        vocab_size=len(VOCAB),
+        ply_expr=8,
+        model_dim=args.model_dim,
+        heads=args.heads,
+        history_layers=args.history_layers,
+        q_layers=args.q_layers,
+        num_queries=args.num_queries,
+        dropout=args.dropout,
+        pad_id=0,
+    )
+    if args.init_checkpoint is not None:
+        load_encoder_checkpoint(model, args.init_checkpoint)
+    model = model.to(args.device)
+
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    for epoch in range(args.epochs):
+        model.train()
+        opt.zero_grad(set_to_none=True)
+        loss_window: deque[float] = deque(maxlen=args.log_window)
+        check_loss_window: deque[float] = deque(maxlen=args.log_window)
+        mate_loss_window: deque[float] = deque(maxlen=args.log_window)
+        turn_loss_window: deque[float] = deque(maxlen=args.log_window)
+        check_acc_window: deque[float] = deque(maxlen=args.log_window)
+        mate_acc_window: deque[float] = deque(maxlen=args.log_window)
+        turn_acc_window: deque[float] = deque(maxlen=args.log_window)
+        p_check_window: deque[float] = deque(maxlen=args.log_window)
+        p_mate_window: deque[float] = deque(maxlen=args.log_window)
+        p_turn_window: deque[float] = deque(maxlen=args.log_window)
+        check_tp_window: deque[int] = deque(maxlen=args.log_window)
+        check_pos_window: deque[int] = deque(maxlen=args.log_window)
+        mate_tp_window: deque[int] = deque(maxlen=args.log_window)
+        mate_pos_window: deque[int] = deque(maxlen=args.log_window)
+        bucket_p_check_sum: dict[int, float] = {}
+        bucket_check_correct: dict[int, int] = {}
+        bucket_check_positive: dict[int, int] = {}
+        bucket_check_tp: dict[int, int] = {}
+        bucket_p_mate_sum: dict[int, float] = {}
+        bucket_mate_correct: dict[int, int] = {}
+        bucket_mate_positive: dict[int, int] = {}
+        bucket_mate_tp: dict[int, int] = {}
+        bucket_p_turn_sum: dict[int, float] = {}
+        bucket_turn_correct: dict[int, int] = {}
+        bucket_count: dict[int, int] = {}
+        pbar = tqdm(loader, desc=f"q-probe epoch {epoch + 1}/{args.epochs}", unit="batch")
+        for step, (x, check_y, mate_y, turn_y, probe_ply) in enumerate(pbar, start=1):
+            x = x.to(args.device, non_blocking=True)
+            check_y = check_y.to(args.device, non_blocking=True)
+            mate_y = mate_y.to(args.device, non_blocking=True)
+            turn_y = turn_y.to(args.device, non_blocking=True)
+            check_logits, mate_logits, turn_logits = model(x)
+            check_loss = F.cross_entropy(check_logits, check_y)
+            mate_loss = F.cross_entropy(mate_logits, mate_y)
+            turn_loss = F.cross_entropy(turn_logits, turn_y)
+            loss = check_loss + mate_loss + turn_loss
+            (loss / args.grad_accum_steps).backward()
+
+            if step % args.grad_accum_steps == 0 or step == len(loader):
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                opt.step()
+                opt.zero_grad(set_to_none=True)
+
+            loss_window.append(float(loss.detach().cpu()))
+            check_loss_window.append(float(check_loss.detach().cpu()))
+            mate_loss_window.append(float(mate_loss.detach().cpu()))
+            turn_loss_window.append(float(turn_loss.detach().cpu()))
+            check_acc_window.append(accuracy(check_logits, check_y))
+            mate_acc_window.append(accuracy(mate_logits, mate_y))
+            turn_acc_window.append(accuracy(turn_logits, turn_y))
+            p_check = check_logits.softmax(dim=-1)[:, 1]
+            p_mate = mate_logits.softmax(dim=-1)[:, 1]
+            p_turn = turn_logits.softmax(dim=-1)[:, 1]
+            p_check_window.append(float(p_check.mean().detach().cpu()))
+            p_mate_window.append(float(p_mate.mean().detach().cpu()))
+            p_turn_window.append(float(p_turn.mean().detach().cpu()))
+            check_pred = check_logits.argmax(dim=-1)
+            mate_pred = mate_logits.argmax(dim=-1)
+            turn_pred = turn_logits.argmax(dim=-1)
+            check_tp_window.append(int(((check_pred == 1) & (check_y == 1)).sum().detach().cpu()))
+            check_pos_window.append(int((check_y == 1).sum().detach().cpu()))
+            mate_tp_window.append(int(((mate_pred == 1) & (mate_y == 1)).sum().detach().cpu()))
+            mate_pos_window.append(int((mate_y == 1).sum().detach().cpu()))
+            for (
+                bucket,
+                check_prob,
+                check_correct,
+                check_positive,
+                check_true_positive,
+                mate_prob,
+                mate_correct,
+                mate_positive,
+                mate_true_positive,
+                turn_prob,
+                turn_correct,
+            ) in zip(
+                ((probe_ply - 1) // args.bucket_plies).tolist(),
+                p_check.detach().cpu().tolist(),
+                (check_pred == check_y).detach().cpu().int().tolist(),
+                check_y.detach().cpu().int().tolist(),
+                ((check_pred == 1) & (check_y == 1)).detach().cpu().int().tolist(),
+                p_mate.detach().cpu().tolist(),
+                (mate_pred == mate_y).detach().cpu().int().tolist(),
+                mate_y.detach().cpu().int().tolist(),
+                ((mate_pred == 1) & (mate_y == 1)).detach().cpu().int().tolist(),
+                p_turn.detach().cpu().tolist(),
+                (turn_pred == turn_y).detach().cpu().int().tolist(),
+                strict=True,
+            ):
+                bucket = int(bucket)
+                bucket_p_check_sum[bucket] = bucket_p_check_sum.get(bucket, 0.0) + float(check_prob)
+                bucket_check_correct[bucket] = bucket_check_correct.get(bucket, 0) + int(check_correct)
+                bucket_check_positive[bucket] = bucket_check_positive.get(bucket, 0) + int(check_positive)
+                bucket_check_tp[bucket] = bucket_check_tp.get(bucket, 0) + int(check_true_positive)
+                bucket_p_mate_sum[bucket] = bucket_p_mate_sum.get(bucket, 0.0) + float(mate_prob)
+                bucket_mate_correct[bucket] = bucket_mate_correct.get(bucket, 0) + int(mate_correct)
+                bucket_mate_positive[bucket] = bucket_mate_positive.get(bucket, 0) + int(mate_positive)
+                bucket_mate_tp[bucket] = bucket_mate_tp.get(bucket, 0) + int(mate_true_positive)
+                bucket_p_turn_sum[bucket] = bucket_p_turn_sum.get(bucket, 0.0) + float(turn_prob)
+                bucket_turn_correct[bucket] = bucket_turn_correct.get(bucket, 0) + int(turn_correct)
+                bucket_count[bucket] = bucket_count.get(bucket, 0) + 1
+            rolling_loss = sum(loss_window) / len(loss_window)
+            pbar.set_postfix(loss=rolling_loss)
+            if step % 100 == 0 or step == len(loader):
+                check_pos = sum(check_pos_window)
+                mate_pos = sum(mate_pos_window)
+                pbar.write(
+                    f"\nepoch={epoch + 1} batch={step}/{len(loader)}\n"
+                    "metric       value\n"
+                    "------------------\n"
+                    f"loss         {rolling_loss:.4f}\n"
+                    f"check_loss   {sum(check_loss_window) / len(check_loss_window):.4f}\n"
+                    f"mate_loss    {sum(mate_loss_window) / len(mate_loss_window):.4f}\n"
+                    f"turn_loss    {sum(turn_loss_window) / len(turn_loss_window):.4f}\n"
+                    f"check_acc    {sum(check_acc_window) / len(check_acc_window):.4f}\n"
+                    f"mate_acc     {sum(mate_acc_window) / len(mate_acc_window):.4f}\n"
+                    f"turn_acc     {sum(turn_acc_window) / len(turn_acc_window):.4f}\n"
+                    f"p_check      {sum(p_check_window) / len(p_check_window):.4f}\n"
+                    f"p_mate       {sum(p_mate_window) / len(p_mate_window):.4f}\n"
+                    f"p_turn       {sum(p_turn_window) / len(p_turn_window):.4f}\n"
+                    f"r_check      {(sum(check_tp_window) / check_pos if check_pos else 0.0):.4f}\n"
+                    f"r_mate       {(sum(mate_tp_window) / mate_pos if mate_pos else 0.0):.4f}\n"
+                    "\nprobe buckets\n"
+                    "plies       p_chk  r_chk  chk+ chk_tp  p_mate r_mate mate+ mate_tp  p_blk  turn_a  n  turn_tp\n"
+                    "----------------------------------------------------------------------------------------------\n"
+                    + "\n".join(
+                        f"{bucket * args.bucket_plies + 1:>3}-"
+                        f"{(bucket + 1) * args.bucket_plies:<3} "
+                        f"{bucket_p_check_sum[bucket] / bucket_count[bucket]:>6.3f} "
+                        f"{(bucket_check_tp[bucket] / bucket_check_positive[bucket] if bucket_check_positive[bucket] else 0.0):>6.3f} "
+                        f"{bucket_check_positive[bucket]:>5} "
+                        f"{bucket_check_tp[bucket]:>6} "
+                        f"{bucket_p_mate_sum[bucket] / bucket_count[bucket]:>7.3f} "
+                        f"{(bucket_mate_tp[bucket] / bucket_mate_positive[bucket] if bucket_mate_positive[bucket] else 0.0):>6.3f} "
+                        f"{bucket_mate_positive[bucket]:>5} "
+                        f"{bucket_mate_tp[bucket]:>7} "
+                        f"{bucket_p_turn_sum[bucket] / bucket_count[bucket]:>6.3f} "
+                        f"{bucket_turn_correct[bucket] / bucket_count[bucket]:>7.3f} "
+                        f"{bucket_count[bucket]:>3} "
+                        f"{bucket_turn_correct[bucket]:>8}"
+                        for bucket in sorted(bucket_count)
+                    )
+                )
+                bucket_p_check_sum.clear()
+                bucket_check_correct.clear()
+                bucket_check_positive.clear()
+                bucket_check_tp.clear()
+                bucket_p_mate_sum.clear()
+                bucket_mate_correct.clear()
+                bucket_mate_positive.clear()
+                bucket_mate_tp.clear()
+                bucket_p_turn_sum.clear()
+                bucket_turn_correct.clear()
+                bucket_count.clear()
+
+        ckpt_path = args.checkpoint_dir / f"q_probe_epoch_{epoch + 1}.pt"
+        torch.save(
+            {
+                "model": model.state_dict(),
+                "args": vars(args),
+                "vocab": VOCAB,
+                "epoch": epoch + 1,
+            },
+            ckpt_path,
+        )
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

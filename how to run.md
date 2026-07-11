@@ -98,6 +98,25 @@ In-epoch snapshots are written every `--snapshot-every-batches` batches by defau
 checkpoints/q_verifier/q_verifier_epoch_<EEE>_batch_<BBBBBB>.pt
 ```
 
+## Vast One-Shot Data Prep + Run
+
+On a fresh Vast instance, clone the repo and run:
+
+```bash
+bash scripts/vast_download_preprocess_run.sh
+```
+
+Default behavior: install deps, `uv sync`, download Lumbras, extract/split PGNs, preprocess the verifier game store, then start the Q-encoder fact probe.
+
+Useful variants:
+
+```bash
+bash scripts/vast_download_preprocess_run.sh --run none
+bash scripts/vast_download_preprocess_run.sh --run qverifier
+bash scripts/vast_download_preprocess_run.sh --skip-download --skip-extract
+bash scripts/vast_download_preprocess_run.sh --workers 32 --chunksize 256
+```
+
 ## Build the Verifier Game Store
 
 The Q-verifier expects preprocessed game-store arrays:
@@ -131,6 +150,33 @@ inputs...                 Optional PGN input paths. Defaults to the two Lumbras 
 --workers INT             Tokenization worker processes (1)
 --chunksize INT           ProcessPool chunksize when workers > 1 (64)
 --no-progress             Disable progress bars
+```
+
+## Train Q-Encoder Fact Probes
+
+Use this to test whether the encoder can recover simple facts from prefixes without relying on final WDL labels.
+
+The probe samples a random prefix length up to `--max-probe-plies` and predicts:
+
+- whether the final ply in the prefix resulted in check/mate
+- whose turn it is next
+
+Important: `CHECK` and `MATE` tokens are removed from the input `x` and used only to build the check label, so the model cannot read the answer directly.
+
+```bash
+uv run python scripts/train_encoder_q_probe.py \
+  --batch-size 32 \
+  --context-plies 125 \
+  --max-probe-plies 250 \
+  --model-dim 256 \
+  --heads 16
+```
+
+Optional: initialize the shared encoder from a Q-verifier checkpoint:
+
+```bash
+uv run python scripts/train_encoder_q_probe.py \
+  --init-checkpoint checkpoints/q_verifier/q_verifier_epoch_1.pt
 ```
 
 ## Train the non-Q Verifier

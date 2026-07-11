@@ -113,6 +113,17 @@ Working notes while discussing architecture. Not final.
 - Training sampler should choose: game passing length filters -> prefix fraction or bucket -> prefix length -> crop/pad context.
 - Preprocessing can be iterated on a Tailnet/Jupyter machine before transferring compact tokenized datasets to Vast.
 
+### Encoder fact probes
+
+Use simple auxiliary probe tasks to separate encoder failure from WDL-label ambiguity.
+
+Initial probes:
+
+- predict whether the final sampled prefix ply resulted in check/mate
+- predict whose turn is next after the sampled prefix
+
+For the check/mate probe, remove `CHECK` and `MATE` tokens from the input and use them only as labels to avoid leakage.
+
 ### State representation ablation
 
 - Pure ply-history AR model.

@@ -12,6 +12,32 @@ cd /home/amanrai/Code/chess
 uv sync
 ```
 
+## Vast one-shot download/preprocess/run
+
+On a fresh Vast instance, clone the repo and run:
+
+```bash
+bash scripts/vast_download_preprocess_run.sh
+```
+
+That script installs system dependencies when `apt-get` is available, installs/syncs `uv`, downloads Lumbras archives, extracts the 2200+ PGN splits, builds the verifier game store, then starts the Q-encoder fact probe.
+
+Useful variants:
+
+```bash
+# Download and preprocess only; do not start training.
+bash scripts/vast_download_preprocess_run.sh --run none
+
+# Run the half-game Q-verifier after preprocessing instead of the fact probe.
+bash scripts/vast_download_preprocess_run.sh --run qverifier
+
+# Resume after data is already downloaded/extracted.
+bash scripts/vast_download_preprocess_run.sh --skip-download --skip-extract
+
+# Tune preprocessing workers/chunksize.
+bash scripts/vast_download_preprocess_run.sh --workers 32 --chunksize 256
+```
+
 ## 1. Download Lumbras OTB archives
 
 Downloads compressed `.7z` PGN archives into `data/raw/lumbras/otb/`.
@@ -122,6 +148,8 @@ Important distinction:
 - context plies: how many sampled ply packets the model can see after crop/pad
 
 Use percentage-based prefixes for interpretable partial-game probes. A fixed context window by itself can include whole short games.
+
+Encoder fact probes can also read directly from this dynamic game store. The check/mate probe derives labels from `CHECK`/`MATE` tokens, then removes those tokens from the input side online to avoid label leakage; no separate preprocessing step is required.
 
 If you want a fixed prefix dataset:
 

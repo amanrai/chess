@@ -218,6 +218,26 @@ Candidates:
 
 The goal would be to enrich the latent state before asking it to support future-state generation.
 
+### Initial fact probes
+
+A first probe should train the same Q-style encoder to predict simple prefix facts:
+
+- whether a randomly selected final prefix ply resulted in check/mate
+- whose turn it is next after that ply
+
+For the check probe, `CHECK` and `MATE` tokens must be removed from the input side and used only as labels. Otherwise the task leaks the answer directly.
+
+Command shape:
+
+```bash
+uv run python scripts/train_encoder_q_probe.py \
+  --batch-size 32 \
+  --context-plies 125 \
+  --max-probe-plies 250 \
+  --model-dim 256 \
+  --heads 16
+```
+
 ## Evaluation plan
 
 Eventually add explicit eval loops. For now training metrics are enough for rough signal, but future evaluation should split results by prefix bucket and data partition.
