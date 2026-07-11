@@ -5,14 +5,15 @@ Splits:
   - base: both players have Elo in [2200, 2400)
   - ft:   both players have Elo >= 2400
 
-The script streams directly from the downloaded .7z archives with bsdtar, so it
-never needs to extract the full corpus to disk first.
+The script streams directly from the downloaded .7z archives with bsdtar or 7z,
+so it never needs to extract the full corpus to disk first.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import re
+import shutil
 import subprocess
 from collections import Counter
 from pathlib import Path
@@ -32,9 +33,21 @@ def parse_elo(value: str | None) -> int | None:
         return None
 
 
+def archive_command(path: Path) -> list[str]:
+    if shutil.which("bsdtar"):
+        return ["bsdtar", "-xOf", str(path)]
+    for exe in ("7z", "7zz", "7za"):
+        if shutil.which(exe):
+            return [exe, "x", "-so", str(path)]
+    raise RuntimeError(
+        "No archive extractor found. Install one of: bsdtar/libarchive-tools, 7z/p7zip-full, 7zz."
+    )
+
+
 def archive_stream(path: Path) -> Iterable[str]:
+    cmd = archive_command(path)
     proc = subprocess.Popen(
-        ["bsdtar", "-xOf", str(path)],
+        cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

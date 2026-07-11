@@ -171,6 +171,21 @@ def accuracy(logits: torch.Tensor, y: torch.Tensor) -> float:
     return float((logits.argmax(dim=-1) == y).float().mean().detach().cpu())
 
 
+def format_table(headers: list[str], rows: list[list[str]]) -> str:
+    widths = [len(header) for header in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+
+    def sep() -> str:
+        return "+" + "+".join("-" * (width + 2) for width in widths) + "+"
+
+    def fmt_row(row: list[str]) -> str:
+        return "| " + " | ".join(cell.rjust(widths[i]) for i, cell in enumerate(row)) + " |"
+
+    return "\n".join([sep(), fmt_row(headers), sep(), *(fmt_row(row) for row in rows), sep()])
+
+
 def read_dotenv_key(path: Path = ROOT / ".env", key: str = "wandb_key") -> str | None:
     if not path.exists():
         return None
@@ -218,7 +233,7 @@ def main() -> int:
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data" / "processed" / "lumbras" / "verifier")
     parser.add_argument("--context-plies", type=int, default=128)
     parser.add_argument("--max-probe-plies", type=int, default=250, help="Sample probe prefix length uniformly from 1..min(game plies, this)")
-    parser.add_argument("--bucket-plies", type=int, default=25, help="Bucket size for per-ply-range p_turn logs")
+    parser.add_argument("--bucket-plies", type=int, default=25, help="Bucket size for per-ply-range turn logs")
     parser.add_argument("--min-game-plies", type=int, default=None)
     parser.add_argument("--max-game-plies", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=32)
@@ -301,24 +316,34 @@ def main() -> int:
         check_acc_window: deque[float] = deque(maxlen=args.log_window)
         mate_acc_window: deque[float] = deque(maxlen=args.log_window)
         turn_acc_window: deque[float] = deque(maxlen=args.log_window)
-        p_check_window: deque[float] = deque(maxlen=args.log_window)
-        p_mate_window: deque[float] = deque(maxlen=args.log_window)
-        p_turn_window: deque[float] = deque(maxlen=args.log_window)
+        prob_check_window: deque[float] = deque(maxlen=args.log_window)
+        prob_mate_window: deque[float] = deque(maxlen=args.log_window)
+        prob_black_window: deque[float] = deque(maxlen=args.log_window)
         check_tp_window: deque[int] = deque(maxlen=args.log_window)
         check_pos_window: deque[int] = deque(maxlen=args.log_window)
+        check_pred_pos_window: deque[int] = deque(maxlen=args.log_window)
         mate_tp_window: deque[int] = deque(maxlen=args.log_window)
         mate_pos_window: deque[int] = deque(maxlen=args.log_window)
+        mate_pred_pos_window: deque[int] = deque(maxlen=args.log_window)
+        black_tp_window: deque[int] = deque(maxlen=args.log_window)
+        black_pos_window: deque[int] = deque(maxlen=args.log_window)
+        black_pred_pos_window: deque[int] = deque(maxlen=args.log_window)
         turn_correct_window: deque[int] = deque(maxlen=args.log_window)
         sample_count_window: deque[int] = deque(maxlen=args.log_window)
-        bucket_p_check_sum: dict[int, float] = {}
+        bucket_prob_check_sum: dict[int, float] = {}
         bucket_check_correct: dict[int, int] = {}
         bucket_check_positive: dict[int, int] = {}
+        bucket_check_pred_positive: dict[int, int] = {}
         bucket_check_tp: dict[int, int] = {}
-        bucket_p_mate_sum: dict[int, float] = {}
+        bucket_prob_mate_sum: dict[int, float] = {}
         bucket_mate_correct: dict[int, int] = {}
         bucket_mate_positive: dict[int, int] = {}
+        bucket_mate_pred_positive: dict[int, int] = {}
         bucket_mate_tp: dict[int, int] = {}
-        bucket_p_turn_sum: dict[int, float] = {}
+        bucket_prob_black_sum: dict[int, float] = {}
+        bucket_black_positive: dict[int, int] = {}
+        bucket_black_pred_positive: dict[int, int] = {}
+        bucket_black_tp: dict[int, int] = {}
         bucket_turn_correct: dict[int, int] = {}
         bucket_count: dict[int, int] = {}
         pbar = tqdm(loader, desc=f"q-probe epoch {epoch + 1}/{args.epochs}", unit="batch")
@@ -346,19 +371,24 @@ def main() -> int:
             check_acc_window.append(accuracy(check_logits, check_y))
             mate_acc_window.append(accuracy(mate_logits, mate_y))
             turn_acc_window.append(accuracy(turn_logits, turn_y))
-            p_check = check_logits.softmax(dim=-1)[:, 1]
-            p_mate = mate_logits.softmax(dim=-1)[:, 1]
-            p_turn = turn_logits.softmax(dim=-1)[:, 1]
-            p_check_window.append(float(p_check.mean().detach().cpu()))
-            p_mate_window.append(float(p_mate.mean().detach().cpu()))
-            p_turn_window.append(float(p_turn.mean().detach().cpu()))
+            prob_check = check_logits.softmax(dim=-1)[:, 1]
+            prob_mate = mate_logits.softmax(dim=-1)[:, 1]
+            prob_black = turn_logits.softmax(dim=-1)[:, 1]
+            prob_check_window.append(float(prob_check.mean().detach().cpu()))
+            prob_mate_window.append(float(prob_mate.mean().detach().cpu()))
+            prob_black_window.append(float(prob_black.mean().detach().cpu()))
             check_pred = check_logits.argmax(dim=-1)
             mate_pred = mate_logits.argmax(dim=-1)
             turn_pred = turn_logits.argmax(dim=-1)
             check_tp_window.append(int(((check_pred == 1) & (check_y == 1)).sum().detach().cpu()))
             check_pos_window.append(int((check_y == 1).sum().detach().cpu()))
+            check_pred_pos_window.append(int((check_pred == 1).sum().detach().cpu()))
             mate_tp_window.append(int(((mate_pred == 1) & (mate_y == 1)).sum().detach().cpu()))
             mate_pos_window.append(int((mate_y == 1).sum().detach().cpu()))
+            mate_pred_pos_window.append(int((mate_pred == 1).sum().detach().cpu()))
+            black_tp_window.append(int(((turn_pred == 1) & (turn_y == 1)).sum().detach().cpu()))
+            black_pos_window.append(int((turn_y == 1).sum().detach().cpu()))
+            black_pred_pos_window.append(int((turn_pred == 1).sum().detach().cpu()))
             turn_correct_window.append(int((turn_pred == turn_y).sum().detach().cpu()))
             sample_count_window.append(int(x.shape[0]))
             for (
@@ -366,37 +396,52 @@ def main() -> int:
                 check_prob,
                 check_correct,
                 check_positive,
+                check_pred_positive,
                 check_true_positive,
                 mate_prob,
                 mate_correct,
                 mate_positive,
+                mate_pred_positive,
                 mate_true_positive,
-                turn_prob,
+                black_prob,
+                black_positive,
+                black_pred_positive,
+                black_true_positive,
                 turn_correct,
             ) in zip(
                 ((probe_ply - 1) // args.bucket_plies).tolist(),
-                p_check.detach().cpu().tolist(),
+                prob_check.detach().cpu().tolist(),
                 (check_pred == check_y).detach().cpu().int().tolist(),
                 check_y.detach().cpu().int().tolist(),
+                (check_pred == 1).detach().cpu().int().tolist(),
                 ((check_pred == 1) & (check_y == 1)).detach().cpu().int().tolist(),
-                p_mate.detach().cpu().tolist(),
+                prob_mate.detach().cpu().tolist(),
                 (mate_pred == mate_y).detach().cpu().int().tolist(),
                 mate_y.detach().cpu().int().tolist(),
+                (mate_pred == 1).detach().cpu().int().tolist(),
                 ((mate_pred == 1) & (mate_y == 1)).detach().cpu().int().tolist(),
-                p_turn.detach().cpu().tolist(),
+                prob_black.detach().cpu().tolist(),
+                (turn_y == 1).detach().cpu().int().tolist(),
+                (turn_pred == 1).detach().cpu().int().tolist(),
+                ((turn_pred == 1) & (turn_y == 1)).detach().cpu().int().tolist(),
                 (turn_pred == turn_y).detach().cpu().int().tolist(),
                 strict=True,
             ):
                 bucket = int(bucket)
-                bucket_p_check_sum[bucket] = bucket_p_check_sum.get(bucket, 0.0) + float(check_prob)
+                bucket_prob_check_sum[bucket] = bucket_prob_check_sum.get(bucket, 0.0) + float(check_prob)
                 bucket_check_correct[bucket] = bucket_check_correct.get(bucket, 0) + int(check_correct)
                 bucket_check_positive[bucket] = bucket_check_positive.get(bucket, 0) + int(check_positive)
+                bucket_check_pred_positive[bucket] = bucket_check_pred_positive.get(bucket, 0) + int(check_pred_positive)
                 bucket_check_tp[bucket] = bucket_check_tp.get(bucket, 0) + int(check_true_positive)
-                bucket_p_mate_sum[bucket] = bucket_p_mate_sum.get(bucket, 0.0) + float(mate_prob)
+                bucket_prob_mate_sum[bucket] = bucket_prob_mate_sum.get(bucket, 0.0) + float(mate_prob)
                 bucket_mate_correct[bucket] = bucket_mate_correct.get(bucket, 0) + int(mate_correct)
                 bucket_mate_positive[bucket] = bucket_mate_positive.get(bucket, 0) + int(mate_positive)
+                bucket_mate_pred_positive[bucket] = bucket_mate_pred_positive.get(bucket, 0) + int(mate_pred_positive)
                 bucket_mate_tp[bucket] = bucket_mate_tp.get(bucket, 0) + int(mate_true_positive)
-                bucket_p_turn_sum[bucket] = bucket_p_turn_sum.get(bucket, 0.0) + float(turn_prob)
+                bucket_prob_black_sum[bucket] = bucket_prob_black_sum.get(bucket, 0.0) + float(black_prob)
+                bucket_black_positive[bucket] = bucket_black_positive.get(bucket, 0) + int(black_positive)
+                bucket_black_pred_positive[bucket] = bucket_black_pred_positive.get(bucket, 0) + int(black_pred_positive)
+                bucket_black_tp[bucket] = bucket_black_tp.get(bucket, 0) + int(black_true_positive)
                 bucket_turn_correct[bucket] = bucket_turn_correct.get(bucket, 0) + int(turn_correct)
                 bucket_count[bucket] = bucket_count.get(bucket, 0) + 1
             rolling_loss = sum(loss_window) / len(loss_window)
@@ -404,6 +449,11 @@ def main() -> int:
             if wandb_run is not None and (step % args.wandb_log_every == 0 or step == len(loader)):
                 check_pos = sum(check_pos_window)
                 mate_pos = sum(mate_pos_window)
+                check_pred_pos = sum(check_pred_pos_window)
+                mate_pred_pos = sum(mate_pred_pos_window)
+                black_pos = sum(black_pos_window)
+                black_pred_pos = sum(black_pred_pos_window)
+                black_tp = sum(black_tp_window)
                 log_payload = {
                     "train/loss": rolling_loss,
                     "train/check_loss": sum(check_loss_window) / len(check_loss_window),
@@ -412,15 +462,24 @@ def main() -> int:
                     "train/check_acc": sum(check_acc_window) / len(check_acc_window),
                     "train/mate_acc": sum(mate_acc_window) / len(mate_acc_window),
                     "train/turn_acc": sum(turn_acc_window) / len(turn_acc_window),
-                    "train/p_check": sum(p_check_window) / len(p_check_window),
-                    "train/p_mate": sum(p_mate_window) / len(p_mate_window),
-                    "train/p_turn": sum(p_turn_window) / len(p_turn_window),
+                    "train/prob_check": sum(prob_check_window) / len(prob_check_window),
+                    "train/prob_mate": sum(prob_mate_window) / len(prob_mate_window),
+                    "train/prob_black": sum(prob_black_window) / len(prob_black_window),
+                    "train/p_check": sum(check_tp_window) / check_pred_pos if check_pred_pos else 0.0,
                     "train/r_check": sum(check_tp_window) / check_pos if check_pos else 0.0,
+                    "train/p_mate": sum(mate_tp_window) / mate_pred_pos if mate_pred_pos else 0.0,
                     "train/r_mate": sum(mate_tp_window) / mate_pos if mate_pos else 0.0,
+                    "train/p_black": black_tp / black_pred_pos if black_pred_pos else 0.0,
+                    "train/r_black": black_tp / black_pos if black_pos else 0.0,
                     "train/check_positive": check_pos,
+                    "train/check_pred_positive": check_pred_pos,
                     "train/check_tp": sum(check_tp_window),
                     "train/mate_positive": mate_pos,
+                    "train/mate_pred_positive": mate_pred_pos,
                     "train/mate_tp": sum(mate_tp_window),
+                    "train/black_positive": black_pos,
+                    "train/black_pred_positive": black_pred_pos,
+                    "train/black_tp": black_tp,
                     "train/turn_correct": sum(turn_correct_window),
                     "train/n": sum(sample_count_window),
                     "epoch": epoch + 1,
@@ -430,23 +489,48 @@ def main() -> int:
                     lo = bucket * args.bucket_plies + 1
                     hi = (bucket + 1) * args.bucket_plies
                     prefix = f"bucket/{lo}_{hi}"
-                    log_payload[f"{prefix}/p_check"] = bucket_p_check_sum[bucket] / bucket_count[bucket]
+                    log_payload[f"{prefix}/prob_check"] = bucket_prob_check_sum[bucket] / bucket_count[bucket]
+                    log_payload[f"{prefix}/p_check"] = (
+                        bucket_check_tp[bucket] / bucket_check_pred_positive[bucket]
+                        if bucket_check_pred_positive[bucket]
+                        else 0.0
+                    )
                     log_payload[f"{prefix}/r_check"] = (
                         bucket_check_tp[bucket] / bucket_check_positive[bucket]
                         if bucket_check_positive[bucket]
                         else 0.0
                     )
                     log_payload[f"{prefix}/check_positive"] = bucket_check_positive[bucket]
+                    log_payload[f"{prefix}/check_pred_positive"] = bucket_check_pred_positive[bucket]
                     log_payload[f"{prefix}/check_tp"] = bucket_check_tp[bucket]
-                    log_payload[f"{prefix}/p_mate"] = bucket_p_mate_sum[bucket] / bucket_count[bucket]
+                    log_payload[f"{prefix}/prob_mate"] = bucket_prob_mate_sum[bucket] / bucket_count[bucket]
+                    log_payload[f"{prefix}/p_mate"] = (
+                        bucket_mate_tp[bucket] / bucket_mate_pred_positive[bucket]
+                        if bucket_mate_pred_positive[bucket]
+                        else 0.0
+                    )
                     log_payload[f"{prefix}/r_mate"] = (
                         bucket_mate_tp[bucket] / bucket_mate_positive[bucket]
                         if bucket_mate_positive[bucket]
                         else 0.0
                     )
                     log_payload[f"{prefix}/mate_positive"] = bucket_mate_positive[bucket]
+                    log_payload[f"{prefix}/mate_pred_positive"] = bucket_mate_pred_positive[bucket]
                     log_payload[f"{prefix}/mate_tp"] = bucket_mate_tp[bucket]
-                    log_payload[f"{prefix}/p_black"] = bucket_p_turn_sum[bucket] / bucket_count[bucket]
+                    log_payload[f"{prefix}/prob_black"] = bucket_prob_black_sum[bucket] / bucket_count[bucket]
+                    log_payload[f"{prefix}/p_black"] = (
+                        bucket_black_tp[bucket] / bucket_black_pred_positive[bucket]
+                        if bucket_black_pred_positive[bucket]
+                        else 0.0
+                    )
+                    log_payload[f"{prefix}/r_black"] = (
+                        bucket_black_tp[bucket] / bucket_black_positive[bucket]
+                        if bucket_black_positive[bucket]
+                        else 0.0
+                    )
+                    log_payload[f"{prefix}/black_positive"] = bucket_black_positive[bucket]
+                    log_payload[f"{prefix}/black_pred_positive"] = bucket_black_pred_positive[bucket]
+                    log_payload[f"{prefix}/black_tp"] = bucket_black_tp[bucket]
                     log_payload[f"{prefix}/turn_acc"] = bucket_turn_correct[bucket] / bucket_count[bucket]
                     log_payload[f"{prefix}/n"] = bucket_count[bucket]
                     log_payload[f"{prefix}/turn_correct"] = bucket_turn_correct[bucket]
@@ -454,53 +538,99 @@ def main() -> int:
 
             if step % 100 == 0 or step == len(loader):
                 check_pos = sum(check_pos_window)
+                check_pred_pos = sum(check_pred_pos_window)
                 mate_pos = sum(mate_pos_window)
+                mate_pred_pos = sum(mate_pred_pos_window)
+                black_pos = sum(black_pos_window)
+                black_pred_pos = sum(black_pred_pos_window)
+                black_tp = sum(black_tp_window)
+                metric_table = format_table(
+                    ["metric", "value"],
+                    [
+                        ["loss", f"{rolling_loss:.4f}"],
+                        ["check_loss", f"{sum(check_loss_window) / len(check_loss_window):.4f}"],
+                        ["mate_loss", f"{sum(mate_loss_window) / len(mate_loss_window):.4f}"],
+                        ["turn_loss", f"{sum(turn_loss_window) / len(turn_loss_window):.4f}"],
+                        ["check_acc", f"{sum(check_acc_window) / len(check_acc_window):.4f}"],
+                        ["mate_acc", f"{sum(mate_acc_window) / len(mate_acc_window):.4f}"],
+                        ["turn_acc", f"{sum(turn_acc_window) / len(turn_acc_window):.4f}"],
+                        ["prob_check", f"{sum(prob_check_window) / len(prob_check_window):.4f}"],
+                        ["prob_mate", f"{sum(prob_mate_window) / len(prob_mate_window):.4f}"],
+                        ["prob_black", f"{sum(prob_black_window) / len(prob_black_window):.4f}"],
+                        ["p_check", f"{(sum(check_tp_window) / check_pred_pos if check_pred_pos else 0.0):.4f}"],
+                        ["r_check", f"{(sum(check_tp_window) / check_pos if check_pos else 0.0):.4f}"],
+                        ["p_mate", f"{(sum(mate_tp_window) / mate_pred_pos if mate_pred_pos else 0.0):.4f}"],
+                        ["r_mate", f"{(sum(mate_tp_window) / mate_pos if mate_pos else 0.0):.4f}"],
+                        ["p_black", f"{(black_tp / black_pred_pos if black_pred_pos else 0.0):.4f}"],
+                        ["r_black", f"{(black_tp / black_pos if black_pos else 0.0):.4f}"],
+                    ],
+                )
+                bucket_rows = []
+                for bucket in sorted(bucket_count):
+                    bucket_rows.append(
+                        [
+                            f"{bucket * args.bucket_plies + 1}-{(bucket + 1) * args.bucket_plies}",
+                            f"{(bucket_check_tp[bucket] / bucket_check_pred_positive[bucket] if bucket_check_pred_positive[bucket] else 0.0):.3f}",
+                            f"{(bucket_check_tp[bucket] / bucket_check_positive[bucket] if bucket_check_positive[bucket] else 0.0):.3f}",
+                            str(bucket_check_positive[bucket]),
+                            str(bucket_check_pred_positive[bucket]),
+                            str(bucket_check_tp[bucket]),
+                            f"{(bucket_mate_tp[bucket] / bucket_mate_pred_positive[bucket] if bucket_mate_pred_positive[bucket] else 0.0):.3f}",
+                            f"{(bucket_mate_tp[bucket] / bucket_mate_positive[bucket] if bucket_mate_positive[bucket] else 0.0):.3f}",
+                            str(bucket_mate_positive[bucket]),
+                            str(bucket_mate_pred_positive[bucket]),
+                            str(bucket_mate_tp[bucket]),
+                            f"{(bucket_black_tp[bucket] / bucket_black_pred_positive[bucket] if bucket_black_pred_positive[bucket] else 0.0):.3f}",
+                            f"{(bucket_black_tp[bucket] / bucket_black_positive[bucket] if bucket_black_positive[bucket] else 0.0):.3f}",
+                            str(bucket_black_positive[bucket]),
+                            str(bucket_black_pred_positive[bucket]),
+                            str(bucket_black_tp[bucket]),
+                            f"{bucket_turn_correct[bucket] / bucket_count[bucket]:.3f}",
+                            str(bucket_count[bucket]),
+                        ]
+                    )
+                bucket_table = format_table(
+                    [
+                        "plies",
+                        "p_chk",
+                        "r_chk",
+                        "chk+",
+                        "chk_pred",
+                        "chk_tp",
+                        "p_mate",
+                        "r_mate",
+                        "mate+",
+                        "mate_pred",
+                        "mate_tp",
+                        "p_blk",
+                        "r_blk",
+                        "blk+",
+                        "blk_pred",
+                        "blk_tp",
+                        "turn_a",
+                        "n",
+                    ],
+                    bucket_rows,
+                )
                 pbar.write(
                     f"\nepoch={epoch + 1} batch={step}/{len(loader)}\n"
-                    "metric       value\n"
-                    "------------------\n"
-                    f"loss         {rolling_loss:.4f}\n"
-                    f"check_loss   {sum(check_loss_window) / len(check_loss_window):.4f}\n"
-                    f"mate_loss    {sum(mate_loss_window) / len(mate_loss_window):.4f}\n"
-                    f"turn_loss    {sum(turn_loss_window) / len(turn_loss_window):.4f}\n"
-                    f"check_acc    {sum(check_acc_window) / len(check_acc_window):.4f}\n"
-                    f"mate_acc     {sum(mate_acc_window) / len(mate_acc_window):.4f}\n"
-                    f"turn_acc     {sum(turn_acc_window) / len(turn_acc_window):.4f}\n"
-                    f"p_check      {sum(p_check_window) / len(p_check_window):.4f}\n"
-                    f"p_mate       {sum(p_mate_window) / len(p_mate_window):.4f}\n"
-                    f"p_turn       {sum(p_turn_window) / len(p_turn_window):.4f}\n"
-                    f"r_check      {(sum(check_tp_window) / check_pos if check_pos else 0.0):.4f}\n"
-                    f"r_mate       {(sum(mate_tp_window) / mate_pos if mate_pos else 0.0):.4f}\n"
-                    "\nprobe buckets\n"
-                    "plies       p_chk  r_chk  chk+ chk_tp  p_mate r_mate mate+ mate_tp  p_blk  turn_a  n  turn_tp\n"
-                    "----------------------------------------------------------------------------------------------\n"
-                    + "\n".join(
-                        f"{bucket * args.bucket_plies + 1:>3}-"
-                        f"{(bucket + 1) * args.bucket_plies:<3} "
-                        f"{bucket_p_check_sum[bucket] / bucket_count[bucket]:>6.3f} "
-                        f"{(bucket_check_tp[bucket] / bucket_check_positive[bucket] if bucket_check_positive[bucket] else 0.0):>6.3f} "
-                        f"{bucket_check_positive[bucket]:>5} "
-                        f"{bucket_check_tp[bucket]:>6} "
-                        f"{bucket_p_mate_sum[bucket] / bucket_count[bucket]:>7.3f} "
-                        f"{(bucket_mate_tp[bucket] / bucket_mate_positive[bucket] if bucket_mate_positive[bucket] else 0.0):>6.3f} "
-                        f"{bucket_mate_positive[bucket]:>5} "
-                        f"{bucket_mate_tp[bucket]:>7} "
-                        f"{bucket_p_turn_sum[bucket] / bucket_count[bucket]:>6.3f} "
-                        f"{bucket_turn_correct[bucket] / bucket_count[bucket]:>7.3f} "
-                        f"{bucket_count[bucket]:>3} "
-                        f"{bucket_turn_correct[bucket]:>8}"
-                        for bucket in sorted(bucket_count)
-                    )
+                    f"\nsummary\n{metric_table}\n"
+                    f"\nprobe buckets\n{bucket_table}"
                 )
-                bucket_p_check_sum.clear()
+                bucket_prob_check_sum.clear()
                 bucket_check_correct.clear()
                 bucket_check_positive.clear()
+                bucket_check_pred_positive.clear()
                 bucket_check_tp.clear()
-                bucket_p_mate_sum.clear()
+                bucket_prob_mate_sum.clear()
                 bucket_mate_correct.clear()
                 bucket_mate_positive.clear()
+                bucket_mate_pred_positive.clear()
                 bucket_mate_tp.clear()
-                bucket_p_turn_sum.clear()
+                bucket_prob_black_sum.clear()
+                bucket_black_positive.clear()
+                bucket_black_pred_positive.clear()
+                bucket_black_tp.clear()
                 bucket_turn_correct.clear()
                 bucket_count.clear()
 
