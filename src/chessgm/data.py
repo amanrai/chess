@@ -59,7 +59,7 @@ def weighted_choice(items, weights, rng: random.Random):
     total = sum(weights)
     r = rng.random() * total
     upto = 0.0
-    for item, weight in zip(items, weights):
+    for item, weight in zip(items, weights, strict=True):
         upto += weight
         if upto >= r:
             return item
@@ -96,7 +96,9 @@ class VerifierGameStoreDataset(Dataset):
         self.context_plies = context_plies
         self.pad_id = pad_id
         self.bucket_mode = bucket_mode
-        self.buckets = buckets or (FRACTION_PREFIX_BUCKETS if bucket_mode == "fraction" else ABSOLUTE_PREFIX_BUCKETS)
+        self.buckets = buckets or (
+            FRACTION_PREFIX_BUCKETS if bucket_mode == "fraction" else ABSOLUTE_PREFIX_BUCKETS
+        )
         self.seed = seed
         self.ply_expr = int(self.moves.shape[1])
         self.sample_mode = sample_mode
@@ -246,6 +248,92 @@ class InverseTransitionDataset(Dataset):
         end = int(self.offsets[game_i + 1])
         num_plies = end - start
         target_offset = rng.randrange(1, num_plies)
+
+        before = self.moves[start : start + target_offset]
+        target = self.moves[start + target_offset]
+        after = self.moves[start : start + target_offset + 1]
+        return (
+            torch.from_numpy(self._state_history(before).astype(np.int64)),
+            torch.from_numpy(self._state_history(after).astype(np.int64)),
+            torch.from_numpy(target.astype(np.int64)),
+        )
+
+
+class OutcomeConditionedTransitionDataset(InverseTransitionDataset):
+    """Balance transition locations and require the side to move to win.
+
+    A target at even zero-based ply offset is a white move and is sampled only
+    from a white-win game (label 0). Odd offsets are black moves and are sampled
+    only from black-win games (label 1). Draws are intentionally excluded.
+    """
+
+    WHITE_WIN = 0
+    BLACK_WIN = 1
+
+    def __init__(
+        self,
+        root: str | Path,
+        context_plies: int = 128,
+        pad_id: int = 0,
+        examples_per_epoch: int = 20_000_000,
+        seed: int = 0,
+        min_game_plies: int | None = None,
+        max_game_plies: int | None = None,
+        max_transition_plies: int = 200,
+    ):
+        super().__init__(
+            root=root,
+            context_plies=context_plies,
+            pad_id=pad_id,
+            examples_per_epoch=examples_per_epoch,
+            seed=seed,
+            min_game_plies=min_game_plies,
+            max_game_plies=max_game_plies,
+        )
+        if max_transition_plies < 1:
+            raise ValueError("max_transition_plies must be >= 1")
+        self.results = np.load(self.root / "results.npy", mmap_mode="r")
+        self.max_transition_plies = max_transition_plies
+        game_lengths = np.diff(self.offsets)
+        self.game_indices_by_result: dict[int, np.ndarray] = {}
+        self.game_lengths_by_result: dict[int, np.ndarray] = {}
+        for result in (self.WHITE_WIN, self.BLACK_WIN):
+            indices = self.game_indices[self.results[self.game_indices] == result]
+            lengths = game_lengths[indices]
+            order = np.argsort(lengths, kind="stable")
+            self.game_indices_by_result[result] = indices[order]
+            self.game_lengths_by_result[result] = lengths[order]
+
+        self.target_plies = [
+            ply
+            for ply in range(1, max_transition_plies + 1)
+            if self._has_eligible_game(self._result_for_target_ply(ply), ply)
+        ]
+        if not self.target_plies:
+            raise ValueError(
+                "no outcome-conditioned transitions available within "
+                f"max_transition_plies={max_transition_plies}"
+            )
+
+    @classmethod
+    def _result_for_target_ply(cls, target_ply: int) -> int:
+        return cls.WHITE_WIN if target_ply % 2 == 0 else cls.BLACK_WIN
+
+    def _eligible_start(self, result: int, target_ply: int) -> int:
+        lengths = self.game_lengths_by_result[result]
+        return int(np.searchsorted(lengths, target_ply, side="right"))
+
+    def _has_eligible_game(self, result: int, target_ply: int) -> bool:
+        return self._eligible_start(result, target_ply) < len(self.game_indices_by_result[result])
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        rng = random.Random(self.seed + idx)
+        target_offset = self.target_plies[rng.randrange(len(self.target_plies))]
+        result = self._result_for_target_ply(target_offset)
+        eligible_start = self._eligible_start(result, target_offset)
+        game_indices = self.game_indices_by_result[result]
+        game_i = int(game_indices[rng.randrange(eligible_start, len(game_indices))])
+        start = int(self.offsets[game_i])
 
         before = self.moves[start : start + target_offset]
         target = self.moves[start + target_offset]

@@ -22,7 +22,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from chessgm.data import InverseTransitionDataset
+from chessgm.data import OutcomeConditionedTransitionDataset
 from chessgm.network_q import QInverseTransitionDecoder
 from chessgm.tokenizer import TOKEN_TO_ID, VOCAB
 
@@ -109,7 +109,18 @@ def main() -> int:
     parser.add_argument("--num-queries", type=int, default=16)
     parser.add_argument("--transition-layers", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.0)
-    parser.add_argument("--examples-per-epoch", type=int, default=None)
+    parser.add_argument(
+        "--examples-per-epoch",
+        type=int,
+        default=20_000_000,
+        help="Outcome-conditioned transitions sampled with replacement per epoch",
+    )
+    parser.add_argument(
+        "--max-transition-plies",
+        type=int,
+        default=200,
+        help="Uniformly sample target plies from 1 through this limit when available",
+    )
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument(
         "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu"
@@ -147,23 +158,30 @@ def main() -> int:
         raise ValueError("--grad-accum-steps must be >= 1")
     if args.transition_layers < 0:
         raise ValueError("--transition-layers must be >= 0")
+    if args.max_transition_plies < 1:
+        raise ValueError("--max-transition-plies must be >= 1")
     if args.snapshot_every_batches < 0:
         raise ValueError("--snapshot-every-batches must be >= 0")
     if args.freeze_encoder and args.pretrained_encoder_checkpoint is None:
         raise ValueError("--freeze-encoder requires --pretrained-encoder-checkpoint")
 
-    dataset = InverseTransitionDataset(
+    dataset = OutcomeConditionedTransitionDataset(
         args.data_dir,
         context_plies=args.context_plies,
         min_game_plies=args.min_game_plies,
         max_game_plies=args.max_game_plies,
+        max_transition_plies=args.max_transition_plies,
         examples_per_epoch=args.examples_per_epoch,
     )
+    white_games = len(dataset.game_indices_by_result[dataset.WHITE_WIN])
+    black_games = len(dataset.game_indices_by_result[dataset.BLACK_WIN])
     print(
         "dataset: "
-        f"games={len(dataset.game_indices):,} examples_per_epoch={len(dataset):,} "
-        f"context_plies={args.context_plies} min_game_plies={args.min_game_plies} "
-        f"max_game_plies={args.max_game_plies}"
+        f"games={len(dataset.game_indices):,} white_win_games={white_games:,} "
+        f"black_win_games={black_games:,} examples_per_epoch={len(dataset):,} "
+        f"context_plies={args.context_plies} transition_plies="
+        f"{min(dataset.target_plies)}..{max(dataset.target_plies)} "
+        f"min_game_plies={args.min_game_plies} max_game_plies={args.max_game_plies}"
     )
     loader = DataLoader(
         dataset,
