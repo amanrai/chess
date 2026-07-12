@@ -187,3 +187,71 @@ class VerifierGameStoreDataset(Dataset):
 
         y = int(self.results[game_i])
         return torch.from_numpy(x.astype(np.int64)), torch.tensor(y, dtype=torch.long)
+
+
+class InverseTransitionDataset(Dataset):
+    """Sample immediate state transitions from verifier game-store arrays.
+
+    Each item represents ``state_t --move_t--> state_t+1``. Both states are
+    left-padded/cropped histories, and the target is the complete eight-token
+    packet for ``move_t``. ``state_t`` always has at least one prior ply.
+    """
+
+    def __init__(
+        self,
+        root: str | Path,
+        context_plies: int = 128,
+        pad_id: int = 0,
+        examples_per_epoch: int | None = None,
+        seed: int = 0,
+        min_game_plies: int | None = None,
+        max_game_plies: int | None = None,
+    ):
+        self.root = Path(root)
+        self.moves = np.load(self.root / "moves.npy", mmap_mode="r")
+        self.offsets = np.load(self.root / "offsets.npy", mmap_mode="r")
+        self.context_plies = context_plies
+        self.pad_id = pad_id
+        self.seed = seed
+        self.ply_expr = int(self.moves.shape[1])
+        if context_plies < 1:
+            raise ValueError("context_plies must be >= 1")
+
+        game_lengths_plies = np.diff(self.offsets)
+        valid_mask = game_lengths_plies >= 2
+        if min_game_plies is not None:
+            valid_mask &= game_lengths_plies >= min_game_plies
+        if max_game_plies is not None:
+            valid_mask &= game_lengths_plies <= max_game_plies
+        self.game_indices = np.flatnonzero(valid_mask).astype(np.int64)
+        if len(self.game_indices) == 0:
+            raise ValueError("no games with at least two plies left after transition filtering")
+        self.examples_per_epoch = examples_per_epoch or len(self.game_indices)
+
+    def __len__(self) -> int:
+        return self.examples_per_epoch
+
+    def _state_history(self, prefix: np.ndarray) -> np.ndarray:
+        if len(prefix) >= self.context_plies:
+            return prefix[-self.context_plies :]
+        pad_rows = np.full(
+            (self.context_plies - len(prefix), self.ply_expr), self.pad_id, dtype=np.uint16
+        )
+        return np.concatenate([pad_rows, prefix], axis=0)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        rng = random.Random(self.seed + idx)
+        game_i = int(self.game_indices[rng.randrange(len(self.game_indices))])
+        start = int(self.offsets[game_i])
+        end = int(self.offsets[game_i + 1])
+        num_plies = end - start
+        target_offset = rng.randrange(1, num_plies)
+
+        before = self.moves[start : start + target_offset]
+        target = self.moves[start + target_offset]
+        after = self.moves[start : start + target_offset + 1]
+        return (
+            torch.from_numpy(self._state_history(before).astype(np.int64)),
+            torch.from_numpy(self._state_history(after).astype(np.int64)),
+            torch.from_numpy(target.astype(np.int64)),
+        )
