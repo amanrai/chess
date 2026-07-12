@@ -161,14 +161,21 @@ def load_pretrained_qformer_encoder(
 
 
 class DiffThinkerMLP(nn.Module):
-    """Single-query cross-attention readout over an unpooled Q-Former state bank.
+    """Task-specific single-query cross-attention + MLP head for a Q-bank.
 
-    A learned query asks one task-specific question of all Q-Former slots. Its
-    single-head attention result is refined by an MLP and returned as [B, D],
-    ready for a task head without mean-pooling the state bank.
+    Each head learns one question of an unpooled Q-Former state bank, refines
+    its answer with a small MLP, and directly produces task logits. Multiple
+    heads therefore impose distinct feature-learning objectives on one shared
+    Q-Former encoder without a shared readout bottleneck.
     """
 
-    def __init__(self, model_dim: int, mlp_mult: int = 4, dropout: float = 0.0):
+    def __init__(
+        self,
+        model_dim: int,
+        num_outputs: int,
+        mlp_mult: int = 4,
+        dropout: float = 0.0,
+    ):
         super().__init__()
         self.readout_query = nn.Parameter(torch.randn(1, model_dim) * 0.02)
         self.ln_query = nn.LayerNorm(model_dim)
@@ -188,9 +195,10 @@ class DiffThinkerMLP(nn.Module):
             nn.Dropout(dropout),
         )
         self.ln_f = nn.LayerNorm(model_dim)
+        self.classifier = nn.Linear(model_dim, num_outputs)
 
     def forward(self, q_bank: torch.Tensor) -> torch.Tensor:
-        """Read a single state vector from a Q-Former bank [B, K, D]."""
+        """Produce task logits from a Q-Former bank [B, K, D]."""
         if q_bank.ndim != 3:
             raise ValueError(f"expected Q-bank [B, K, D], got {tuple(q_bank.shape)}")
         queries = self.readout_query[None, :, :].expand(q_bank.shape[0], -1, -1)
@@ -203,7 +211,7 @@ class DiffThinkerMLP(nn.Module):
         )
         readout = queries + attended
         readout = readout + self.mlp(self.ln_mlp(readout))
-        return self.ln_f(readout).squeeze(1)
+        return self.classifier(self.ln_f(readout).squeeze(1))
 
 
 class QInverseTransitionDecoder(nn.Module):

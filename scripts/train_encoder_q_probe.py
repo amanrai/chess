@@ -142,30 +142,13 @@ class QPlyProbeTransformer(nn.Module):
             dropout=dropout,
             pad_id=pad_id,
         )
-        self.thinker = DiffThinkerMLP(model_dim=model_dim, dropout=dropout)
-        self.check_head = nn.Sequential(
-            nn.Linear(model_dim, model_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(model_dim, 2),
-        )
-        self.mate_head = nn.Sequential(
-            nn.Linear(model_dim, model_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(model_dim, 2),
-        )
-        self.turn_head = nn.Sequential(
-            nn.Linear(model_dim, model_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(model_dim, 2),
-        )
+        self.check_head = DiffThinkerMLP(model_dim=model_dim, num_outputs=2, dropout=dropout)
+        self.mate_head = DiffThinkerMLP(model_dim=model_dim, num_outputs=2, dropout=dropout)
+        self.turn_head = DiffThinkerMLP(model_dim=model_dim, num_outputs=2, dropout=dropout)
 
     def forward(self, x_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         q = self.encoder(x_ids)
-        state = self.thinker(q)
-        return self.check_head(state), self.mate_head(state), self.turn_head(state)
+        return self.check_head(q), self.mate_head(q), self.turn_head(q)
 
 
 def accuracy(logits: torch.Tensor, y: torch.Tensor) -> float:

@@ -33,16 +33,23 @@ class QInverseTransitionDecoderTests(unittest.TestCase):
         self.assertIsNotNone(model.inverse_attention.cross_attn.in_proj_weight.grad)
 
     def test_diff_thinker_reads_full_q_bank_with_single_query(self):
-        readout = DiffThinkerMLP(model_dim=16)
+        head = DiffThinkerMLP(model_dim=16, num_outputs=3)
         q_bank = torch.randn(3, 4, 16, requires_grad=True)
 
-        state = readout(q_bank)
+        logits = head(q_bank)
 
-        self.assertEqual(state.shape, (3, 16))
-        self.assertEqual(readout.cross_attn.num_heads, 1)
-        state.sum().backward()
+        self.assertEqual(logits.shape, (3, 3))
+        self.assertEqual(head.cross_attn.num_heads, 1)
+        logits.sum().backward()
         self.assertIsNotNone(q_bank.grad)
-        self.assertIsNotNone(readout.readout_query.grad)
+        self.assertIsNotNone(head.readout_query.grad)
+        self.assertIsNotNone(head.classifier.weight.grad)
+
+    def test_diff_thinker_heads_have_independent_readout_queries(self):
+        check_head = DiffThinkerMLP(model_dim=16, num_outputs=2)
+        mate_head = DiffThinkerMLP(model_dim=16, num_outputs=2)
+
+        self.assertIsNot(check_head.readout_query, mate_head.readout_query)
 
     def test_loads_and_freezes_only_prefixed_encoder_weights(self):
         source = QFormerPlyHistoryEncoder(
