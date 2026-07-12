@@ -19,7 +19,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
-from chessgm.network_q import QFormerPlyHistoryEncoder
+from chessgm.network_q import DiffThinkerMLP, QFormerPlyHistoryEncoder
 from chessgm.tokenizer import TOKEN_TO_ID, VOCAB
 
 
@@ -142,6 +142,7 @@ class QPlyProbeTransformer(nn.Module):
             dropout=dropout,
             pad_id=pad_id,
         )
+        self.thinker = DiffThinkerMLP(model_dim=model_dim, dropout=dropout)
         self.check_head = nn.Sequential(
             nn.Linear(model_dim, model_dim),
             nn.GELU(),
@@ -163,8 +164,8 @@ class QPlyProbeTransformer(nn.Module):
 
     def forward(self, x_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         q = self.encoder(x_ids)
-        pooled = q.mean(dim=1)
-        return self.check_head(pooled), self.mate_head(pooled), self.turn_head(pooled)
+        state = self.thinker(q)
+        return self.check_head(state), self.mate_head(state), self.turn_head(state)
 
 
 def accuracy(logits: torch.Tensor, y: torch.Tensor) -> float:

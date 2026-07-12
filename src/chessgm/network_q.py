@@ -160,6 +160,52 @@ def load_pretrained_qformer_encoder(
     return len(compatible)
 
 
+class DiffThinkerMLP(nn.Module):
+    """Single-query cross-attention readout over an unpooled Q-Former state bank.
+
+    A learned query asks one task-specific question of all Q-Former slots. Its
+    single-head attention result is refined by an MLP and returned as [B, D],
+    ready for a task head without mean-pooling the state bank.
+    """
+
+    def __init__(self, model_dim: int, mlp_mult: int = 4, dropout: float = 0.0):
+        super().__init__()
+        self.readout_query = nn.Parameter(torch.randn(1, model_dim) * 0.02)
+        self.ln_query = nn.LayerNorm(model_dim)
+        self.ln_context = nn.LayerNorm(model_dim)
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=model_dim,
+            num_heads=1,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.ln_mlp = nn.LayerNorm(model_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(model_dim, mlp_mult * model_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_mult * model_dim, model_dim),
+            nn.Dropout(dropout),
+        )
+        self.ln_f = nn.LayerNorm(model_dim)
+
+    def forward(self, q_bank: torch.Tensor) -> torch.Tensor:
+        """Read a single state vector from a Q-Former bank [B, K, D]."""
+        if q_bank.ndim != 3:
+            raise ValueError(f"expected Q-bank [B, K, D], got {tuple(q_bank.shape)}")
+        queries = self.readout_query[None, :, :].expand(q_bank.shape[0], -1, -1)
+        context = self.ln_context(q_bank)
+        attended, _ = self.cross_attn(
+            query=self.ln_query(queries),
+            key=context,
+            value=context,
+            need_weights=False,
+        )
+        readout = queries + attended
+        readout = readout + self.mlp(self.ln_mlp(readout))
+        return self.ln_f(readout).squeeze(1)
+
+
 class QInverseTransitionDecoder(nn.Module):
     """Decode an immediate ply from Q-Former states before and after that ply.
 

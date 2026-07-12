@@ -4,7 +4,7 @@ from pathlib import Path
 
 import torch
 
-from chessgm.network_q import QFormerPlyHistoryEncoder, QInverseTransitionDecoder
+from chessgm.network_q import DiffThinkerMLP, QFormerPlyHistoryEncoder, QInverseTransitionDecoder
 
 
 class QInverseTransitionDecoderTests(unittest.TestCase):
@@ -31,6 +31,18 @@ class QInverseTransitionDecoderTests(unittest.TestCase):
         logits.sum().backward()
         self.assertIsNotNone(model.encoder.query_tokens.grad)
         self.assertIsNotNone(model.inverse_attention.cross_attn.in_proj_weight.grad)
+
+    def test_diff_thinker_reads_full_q_bank_with_single_query(self):
+        readout = DiffThinkerMLP(model_dim=16)
+        q_bank = torch.randn(3, 4, 16, requires_grad=True)
+
+        state = readout(q_bank)
+
+        self.assertEqual(state.shape, (3, 16))
+        self.assertEqual(readout.cross_attn.num_heads, 1)
+        state.sum().backward()
+        self.assertIsNotNone(q_bank.grad)
+        self.assertIsNotNone(readout.readout_query.grad)
 
     def test_loads_and_freezes_only_prefixed_encoder_weights(self):
         source = QFormerPlyHistoryEncoder(
