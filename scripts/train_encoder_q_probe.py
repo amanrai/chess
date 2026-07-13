@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import os
 import random
+import re
 import sys
+import uuid
 from collections import deque
 from pathlib import Path
 
@@ -193,16 +195,30 @@ def read_dotenv_key(path: Path = ROOT / ".env", key: str = "wandb_key") -> str |
 def init_wandb(args: argparse.Namespace):
     if not args.wandb:
         return None
-    api_key = os.environ.get("WANDB_API_KEY") or read_dotenv_key()
-    import wandb
+    try:
+        api_key = os.environ.get("WANDB_API_KEY") or read_dotenv_key()
+        import wandb
 
-    if api_key:
-        wandb.login(key=api_key)
-    return wandb.init(
-        project=args.wandb_project,
-        name=args.wandb_run_name,
-        config={k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
-    )
+        if api_key:
+            wandb.login(key=api_key)
+        return wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            config={k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
+        )
+    except Exception as exc:
+        print(f"W&B initialization failed; continuing without W&B logging: {exc}")
+        return None
+
+
+def checkpoint_run_id(wandb_run) -> str:
+    """Return a filesystem-safe W&B run name or one stable local fallback."""
+    run_name = getattr(wandb_run, "name", None) if wandb_run is not None else None
+    if run_name:
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(run_name)).strip(".-")
+        if safe_name:
+            return safe_name[:80]
+    return uuid.uuid4().hex[:6]
 
 
 def save_checkpoint(
@@ -213,6 +229,7 @@ def save_checkpoint(
     epoch: int,
     batch: int,
     global_batch: int,
+    run_id: str,
 ) -> None:
     torch.save(
         {
@@ -223,6 +240,7 @@ def save_checkpoint(
             "epoch": epoch,
             "batch": batch,
             "global_batch": global_batch,
+            "run_id": run_id,
         },
         path,
     )
@@ -273,7 +291,7 @@ def main() -> int:
         help="Save an in-epoch snapshot every N batches; 0 disables",
     )
     parser.add_argument("--log-window", type=int, default=1000)
-    parser.add_argument("--check-positive-weight", type=float, default=20.0, help="Initial class weight for positive CHECK labels in check loss")
+    parser.add_argument("--check-positive-weight", type=float, default=5.0, help="Initial class weight for positive CHECK labels in check loss")
     parser.add_argument("--check-positive-weight-end", type=float, default=1.0, help="Final positive CHECK class weight after decay")
     parser.add_argument("--check-positive-weight-decay-batches", type=int, default=150_000, help="Linearly decay CHECK positive class weight over this many total batches; 0 jumps to final weight")
     parser.add_argument("--mate-positive-weight", type=float, default=50.0, help="Class weight for positive MATE labels in mate loss")
@@ -299,6 +317,8 @@ def main() -> int:
         raise ValueError("--mate-positive-weight must be > 0")
 
     wandb_run = init_wandb(args)
+    run_id = checkpoint_run_id(wandb_run)
+    print(f"checkpoint run id: {run_id}")
 
     dataset = PlyProbeDataset(
         args.data_dir,
@@ -689,7 +709,7 @@ def main() -> int:
                 bucket_count.clear()
 
             if args.snapshot_every_batches and step % args.snapshot_every_batches == 0:
-                snapshot_path = args.checkpoint_dir / f"q_probe_epoch_{epoch + 1:03d}_batch_{step:06d}.pt"
+                snapshot_path = args.checkpoint_dir / f"q_probe_{run_id}_epoch_{epoch + 1:03d}_batch_{step:06d}.pt"
                 save_checkpoint(
                     snapshot_path,
                     model=model,
@@ -698,10 +718,11 @@ def main() -> int:
                     epoch=epoch + 1,
                     batch=step,
                     global_batch=global_batch,
+                    run_id=run_id,
                 )
                 pbar.write(f"saved snapshot: {snapshot_path}")
 
-        ckpt_path = args.checkpoint_dir / f"q_probe_epoch_{epoch + 1}.pt"
+        ckpt_path = args.checkpoint_dir / f"q_probe_{run_id}_epoch_{epoch + 1}.pt"
         save_checkpoint(
             ckpt_path,
             model=model,
@@ -710,6 +731,7 @@ def main() -> int:
             epoch=epoch + 1,
             batch=len(loader),
             global_batch=global_batch,
+            run_id=run_id,
         )
 
     return 0
