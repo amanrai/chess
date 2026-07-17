@@ -24,7 +24,9 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -50,6 +52,8 @@ EMPTY = 0
 WHITE_OFFSET = 0
 BLACK_OFFSET = 6
 PACKED_SQUARES = 32
+_WORKER_TOKENIZER: ChessTokenizer | None = None
+_WORKER_CHESS = None
 
 
 def pack_board_after(board) -> np.ndarray:
@@ -89,6 +93,37 @@ def replay_packed_boards(game_text: str, chess) -> list[np.ndarray]:
         board.push(move)
         packed.append(pack_board_after(board))
     return packed
+
+
+def replay_game_for_store(
+    game_text: str, seq_len: int, tokenizer: ChessTokenizer, chess
+) -> tuple[int | None, np.ndarray | None, np.ndarray | None]:
+    """Return accepted game's label, packets, and post-ply packed boards."""
+    result = result_from_pgn_text(game_text)
+    if result not in RESULT_TO_LABEL:
+        return None, None, None
+    packets = pgn_game_to_packets(game_text, tokenizer, seq_len)
+    if packets is None or len(packets) < 2:
+        return None, None, None
+    boards = replay_packed_boards(game_text, chess)
+    if len(boards) != len(packets):
+        raise ValueError(
+            f"board replay produced {len(boards)} plies but tokenization produced {len(packets)}"
+        )
+    return RESULT_TO_LABEL[result], packets, np.asarray(boards, dtype=np.uint8)
+
+
+def _init_replay_worker() -> None:
+    global _WORKER_CHESS, _WORKER_TOKENIZER
+    _WORKER_TOKENIZER = ChessTokenizer()
+    _WORKER_CHESS = _require_python_chess()
+
+
+def _replay_game_worker(args: tuple[str, int]) -> tuple[int | None, np.ndarray | None, np.ndarray | None]:
+    game_text, seq_len = args
+    tokenizer = _WORKER_TOKENIZER or ChessTokenizer()
+    chess = _WORKER_CHESS or _require_python_chess()
+    return replay_game_for_store(game_text, seq_len, tokenizer, chess)
 
 
 def bucket_plan(
@@ -174,44 +209,36 @@ def build_board_targets(
     results: np.ndarray,
     output_path: Path,
     progress: bool,
+    workers: int,
+    chunksize: int,
 ) -> None:
-    """Replay inputs and write targets, proving each accepted game matches store rows."""
-    chess = _require_python_chess()
-    tokenizer = ChessTokenizer()
+    """Replay inputs and write targets, proving each accepted game matches store rows.
+
+    Worker processes parse/tokenize/replay games in parallel. ``Executor.map``
+    preserves source order, while this parent process remains the sole writer
+    and performs the game-store alignment checks before each write.
+    """
+    if chunksize < 1:
+        raise ValueError("chunksize must be >= 1")
+    _require_python_chess()
     target = np.lib.format.open_memmap(
         output_path, mode="w+", dtype=np.uint8, shape=(len(moves), PACKED_SQUARES)
     )
     game_i = 0
     try:
         for path in inputs:
-            games = iter_pgn_games(path)
-            iterator = tqdm(games, desc=f"replaying {path.name}", unit="game", disable=not progress)
-            for game_text in iterator:
-                result = result_from_pgn_text(game_text)
-                if result not in RESULT_TO_LABEL:
-                    continue
-                packets = pgn_game_to_packets(game_text, tokenizer, int(moves.shape[1]))
-                if packets is None or len(packets) < 2:
-                    continue
-                if game_i >= len(results):
-                    raise ValueError("inputs contain more accepted games than the verifier store")
-                start, end = int(offsets[game_i]), int(offsets[game_i + 1])
-                if int(results[game_i]) != RESULT_TO_LABEL[result]:
-                    raise ValueError(f"result mismatch at verifier game {game_i}")
-                if end - start != len(packets) or not np.array_equal(moves[start:end], packets):
-                    raise ValueError(
-                        f"move-store mismatch at verifier game {game_i}; inputs must be the exact "
-                        "PGNs and ordering used to create this verifier store"
+            game_args = ((game_text, int(moves.shape[1])) for game_text in iter_pgn_games(path))
+            if workers > 1:
+                with ProcessPoolExecutor(max_workers=workers, initializer=_init_replay_worker) as pool:
+                    processed = pool.map(_replay_game_worker, game_args, chunksize=chunksize)
+                    game_i = _write_replayed_games(
+                        processed, path, target, moves, offsets, results, game_i, progress
                     )
-                boards = replay_packed_boards(game_text, chess)
-                if len(boards) != len(packets):
-                    raise ValueError(
-                        f"board replay produced {len(boards)} plies but store has {len(packets)} "
-                        f"at verifier game {game_i}"
-                    )
-                target[start:end] = np.asarray(boards, dtype=np.uint8)
-                game_i += 1
-                iterator.set_postfix(accepted=f"{game_i:,}")
+            else:
+                processed = (_replay_game_worker(item) for item in game_args)
+                game_i = _write_replayed_games(
+                    processed, path, target, moves, offsets, results, game_i, progress
+                )
         if game_i != len(results):
             raise ValueError(f"inputs yielded {game_i} accepted games but verifier store contains {len(results)}")
     except Exception:
@@ -220,6 +247,29 @@ def build_board_targets(
         raise
     target.flush()
     del target
+
+
+def _write_replayed_games(processed, path, target, moves, offsets, results, game_i: int, progress: bool) -> int:
+    """Validate ordered replay results and write them, returning the game index."""
+    iterator = tqdm(processed, desc=f"replaying {path.name}", unit="game", disable=not progress)
+    for label, packets, boards in iterator:
+        if packets is None:
+            continue
+        assert label is not None and boards is not None
+        if game_i >= len(results):
+            raise ValueError("inputs contain more accepted games than the verifier store")
+        start, end = int(offsets[game_i]), int(offsets[game_i + 1])
+        if int(results[game_i]) != label:
+            raise ValueError(f"result mismatch at verifier game {game_i}")
+        if end - start != len(packets) or not np.array_equal(moves[start:end], packets):
+            raise ValueError(
+                f"move-store mismatch at verifier game {game_i}; inputs must be the exact "
+                "PGNs and ordering used to create this verifier store"
+            )
+        target[start:end] = boards
+        game_i += 1
+        iterator.set_postfix(accepted=f"{game_i:,}")
+    return game_i
 
 
 def main() -> int:
@@ -232,6 +282,8 @@ def main() -> int:
     parser.add_argument("--max-prefix-plies", type=int, default=250, help="0 includes every stored ply")
     parser.add_argument("--allocation-alpha", type=float, default=1.15, help="Eligible-game allocation exponent; >1 favors early buckets")
     parser.add_argument("--min-samples-per-bucket", type=int, default=0)
+    parser.add_argument("--workers", type=int, default=1, help="PGN replay worker processes; use $(nproc)")
+    parser.add_argument("--chunksize", type=int, default=32, help="Games per worker task")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--no-progress", action="store_true")
     args = parser.parse_args()
@@ -249,11 +301,20 @@ def main() -> int:
     if len(offsets) != len(results) + 1 or int(offsets[-1]) != len(moves):
         raise SystemExit("Verifier store arrays are inconsistent")
 
+    workers = max(1, args.workers)
+    if workers > (os.cpu_count() or workers) and not args.no_progress:
+        print(f"warning: workers={workers} exceeds detected cpu_count={os.cpu_count()}")
+    if args.chunksize < 1:
+        raise SystemExit("--chunksize must be >= 1")
+
     out_dir = args.out_dir or args.data_dir / "board_state"
     out_dir.mkdir(parents=True, exist_ok=True)
     board_path = out_dir / "board_after_packed.npy"
     print(f"writing aligned board targets: {board_path}")
-    build_board_targets(args.inputs, moves, offsets, results, board_path, progress=not args.no_progress)
+    build_board_targets(
+        args.inputs, moves, offsets, results, board_path, progress=not args.no_progress,
+        workers=workers, chunksize=args.chunksize,
+    )
 
     plan, buckets = bucket_plan(
         np.diff(offsets), args.samples, args.bucket_plies, args.max_prefix_plies,
@@ -279,6 +340,8 @@ def main() -> int:
             "max_prefix_plies": args.max_prefix_plies,
             "allocation_alpha": args.allocation_alpha,
             "min_samples_per_bucket": args.min_samples_per_bucket,
+            "workers": workers,
+            "chunksize": args.chunksize,
             "seed": args.seed,
             "buckets": buckets,
         },

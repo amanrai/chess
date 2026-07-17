@@ -139,7 +139,7 @@ probe:
 
 ```bash
 uv sync  # installs python-chess
-uv run python scripts/preprocess_board_state_verifier.py
+uv run python scripts/preprocess_board_state_verifier.py --workers "$(nproc)" --chunksize 32
 ```
 
 This writes `data/processed/lumbras/verifier/board_state/`:
