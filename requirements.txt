@@ -2,6 +2,7 @@ beautifulsoup4>=4.12
 cryptography>=42
 numpy>=2.0
 pandas>=2.2
+python-chess>=1.999
 requests>=2.32
 torch>=2.4
 tqdm>=4.66

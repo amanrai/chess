@@ -131,6 +131,36 @@ Labels:
 2 = draw
 ```
 
+## 3a. Build board-state verifier targets and probe sampling plan
+
+After building the game store, replay its exact source PGNs into compact
+post-ply board labels plus a 20M-position sampling plan for the board-state
+probe:
+
+```bash
+uv sync  # installs python-chess
+uv run python scripts/preprocess_board_state_verifier.py
+```
+
+This writes `data/processed/lumbras/verifier/board_state/`:
+
+```text
+board_after_packed.npy  uint8[total_plies, 32]  # 64 four-bit occupant labels
+probe_samples.npy       uint32[20_000_000, 2]   # (game_index, prefix_plies)
+manifest.json
+```
+
+The sampler chooses a prefix-position bucket first, samples uniformly from
+games that reach that position, and uses an eligible-game-count exponent
+(default `--allocation-alpha 1.15`) to give early positions extra budget. It
+therefore preserves the natural mix of short and long games in early positions
+without repeatedly over-sampling the rare long-game cohort. `--max-prefix-plies
+0` includes the full game-length tail.
+
+The script checks every accepted PGN game's result and token packets against
+`moves.npy` before writing its board labels. Supply the exact inputs and order
+used for the game store if they differ from the defaults.
+
 Stats written to `manifest.json` include:
 
 ```text
