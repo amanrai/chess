@@ -214,6 +214,74 @@ class DiffThinkerMLP(nn.Module):
         return self.classifier(self.ln_f(readout).squeeze(1))
 
 
+class DiffThinkerBoardStateQueryMLP(nn.Module):
+    """Shared square-query board occupancy probe for a Q-Former state bank.
+
+    The module asks multiple square-location questions of one latent state bank.
+    Square identity is represented by a learned embedding; the answer is a
+    13-way occupant classification for each queried square.
+    """
+
+    def __init__(
+        self,
+        model_dim: int,
+        num_squares: int = 64,
+        num_occupants: int = 13,
+        mlp_mult: int = 4,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.num_squares = num_squares
+        self.num_occupants = num_occupants
+        self.square_embedding = nn.Embedding(num_squares, model_dim)
+        self.ln_query = nn.LayerNorm(model_dim)
+        self.ln_context = nn.LayerNorm(model_dim)
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=model_dim,
+            num_heads=1,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.ln_mlp = nn.LayerNorm(model_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(model_dim, mlp_mult * model_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_mult * model_dim, model_dim),
+            nn.Dropout(dropout),
+        )
+        self.ln_f = nn.LayerNorm(model_dim)
+        self.classifier = nn.Linear(model_dim, num_occupants)
+
+    def forward(self, q_bank: torch.Tensor, square_ids: torch.Tensor) -> torch.Tensor:
+        """Produce occupant logits.
+
+        Args:
+          q_bank: [B, K, D] Q-Former state bank.
+          square_ids: [B, Q] square ids in python-chess a1..h8 order.
+
+        Returns:
+          logits: [B, Q, 13].
+        """
+        if q_bank.ndim != 3:
+            raise ValueError(f"expected Q-bank [B, K, D], got {tuple(q_bank.shape)}")
+        if square_ids.ndim != 2:
+            raise ValueError(f"expected square ids [B, Q], got {tuple(square_ids.shape)}")
+        if square_ids.shape[0] != q_bank.shape[0]:
+            raise ValueError("square_ids batch size must match q_bank batch size")
+        queries = self.square_embedding(square_ids)
+        context = self.ln_context(q_bank)
+        attended, _ = self.cross_attn(
+            query=self.ln_query(queries),
+            key=context,
+            value=context,
+            need_weights=False,
+        )
+        readout = queries + attended
+        readout = readout + self.mlp(self.ln_mlp(readout))
+        return self.classifier(self.ln_f(readout))
+
+
 class QInverseTransitionDecoder(nn.Module):
     """Decode an immediate ply from Q-Former states before and after that ply.
 

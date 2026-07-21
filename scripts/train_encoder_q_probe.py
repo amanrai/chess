@@ -291,6 +291,7 @@ def main() -> int:
         help="Save an in-epoch snapshot every N batches; 0 disables",
     )
     parser.add_argument("--log-window", type=int, default=1000)
+    parser.add_argument("--print-every-batches", type=int, default=25, help="Print probe metrics every N batches; 0 disables periodic prints")
     parser.add_argument("--check-positive-weight", type=float, default=5.0, help="Initial class weight for positive CHECK labels in check loss")
     parser.add_argument("--check-positive-weight-end", type=float, default=1.0, help="Final positive CHECK class weight after decay")
     parser.add_argument("--check-positive-weight-decay-batches", type=int, default=150_000, help="Linearly decay CHECK positive class weight over this many total batches; 0 jumps to final weight")
@@ -307,6 +308,8 @@ def main() -> int:
         raise ValueError("--bucket-plies must be >= 1")
     if args.snapshot_every_batches < 0:
         raise ValueError("--snapshot-every-batches must be >= 0")
+    if args.print_every_batches < 0:
+        raise ValueError("--print-every-batches must be >= 0")
     if args.check_positive_weight <= 0:
         raise ValueError("--check-positive-weight must be > 0")
     if args.check_positive_weight_end <= 0:
@@ -611,7 +614,7 @@ def main() -> int:
                     log_payload[f"{prefix}/turn_correct"] = bucket_turn_correct[bucket]
                 wandb_run.log(log_payload, step=(epoch * len(loader)) + step)
 
-            if step % 100 == 0 or step == len(loader):
+            if step == 1 or (args.print_every_batches and step % args.print_every_batches == 0) or step == len(loader):
                 check_pos = sum(check_pos_window)
                 check_pred_pos = sum(check_pred_pos_window)
                 mate_pos = sum(mate_pos_window)

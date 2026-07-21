@@ -1,9 +1,9 @@
 DATA_DIR="data/processed/lumbras/verifier"
+BOARD_STATE_DIR="data/processed/lumbras/verifier/board_state"
 CONTEXT_PLIES="128"
-MAX_PROBE_PLIES="250"
-BUCKET_PLIES="25"
+SQUARES_PER_POSITION="16"
 BATCH_SIZE="32"
-GRAD_ACCUM_STEPS="1"
+GRAD_ACCUM_STEPS="16"
 EPOCHS="1"
 LEARNING_RATE="3e-4"
 WEIGHT_DECAY="0.01"
@@ -15,23 +15,19 @@ Q_PROBE_QUERY_SLOTS="64"
 DROPOUT="0.0"
 DATALOADER_WORKERS="4"
 DEVICE="cuda"
-CHECKPOINT_DIR="checkpoints/q_probe"
+CHECKPOINT_DIR="checkpoints/board_state_q_probe"
 SNAPSHOT_EVERY_BATCHES="50000"
 LOG_WINDOW="1000"
 PRINT_EVERY_BATCHES="25"
-CHECK_POSITIVE_WEIGHT="5.0"
-CHECK_POSITIVE_WEIGHT_END="1.0"
-CHECK_POSITIVE_WEIGHT_DECAY_BATCHES="150000"
-MATE_POSITIVE_WEIGHT="50.0"
 WANDB_FLAG="--wandb"
 WANDB_PROJECT="chess-gm"
 WANDB_LOG_EVERY="100"
 
-python scripts/train_encoder_q_probe.py \
+python scripts/train_board_state_q_probe.py \
   --data-dir "$DATA_DIR" \
+  --board-state-dir "$BOARD_STATE_DIR" \
   --context-plies "$CONTEXT_PLIES" \
-  --max-probe-plies "$MAX_PROBE_PLIES" \
-  --bucket-plies "$BUCKET_PLIES" \
+  --squares-per-position "$SQUARES_PER_POSITION" \
   --batch-size "$BATCH_SIZE" \
   --grad-accum-steps "$GRAD_ACCUM_STEPS" \
   --epochs "$EPOCHS" \
@@ -49,10 +45,6 @@ python scripts/train_encoder_q_probe.py \
   --snapshot-every-batches "$SNAPSHOT_EVERY_BATCHES" \
   --log-window "$LOG_WINDOW" \
   --print-every-batches "$PRINT_EVERY_BATCHES" \
-  --check-positive-weight "$CHECK_POSITIVE_WEIGHT" \
-  --check-positive-weight-end "$CHECK_POSITIVE_WEIGHT_END" \
-  --check-positive-weight-decay-batches "$CHECK_POSITIVE_WEIGHT_DECAY_BATCHES" \
-  --mate-positive-weight "$MATE_POSITIVE_WEIGHT" \
   $WANDB_FLAG \
   --wandb-project "$WANDB_PROJECT" \
   --wandb-log-every "$WANDB_LOG_EVERY"
