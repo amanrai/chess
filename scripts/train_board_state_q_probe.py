@@ -21,8 +21,8 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
-from chessgm.network_q import DiffThinkerBoardStateQueryMLP, QFormerPlyHistoryEncoder
-from chessgm.tokenizer import VOCAB
+from chessgm.network_q import DiffThinkerBoardStateQueryMLP, DiffThinkerMLP, QFormerPlyHistoryEncoder
+from chessgm.tokenizer import TOKEN_TO_ID, VOCAB
 
 NUM_SQUARES = 64
 NUM_OCCUPANTS = 13
@@ -90,11 +90,22 @@ class BoardStateProbeDataset(Dataset):
         self.pad_id = pad_id
         self.ply_expr = int(self.moves.shape[1])
         self.eval_all_squares = eval_all_squares
+        self.check_id = TOKEN_TO_ID["CHECK"]
+        self.mate_id = TOKEN_TO_ID["MATE"]
+        self.leak_label_ids = {self.check_id, self.mate_id}
 
     def __len__(self) -> int:
         return self.examples_per_epoch
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def strip_check_mate_tokens(self, prefix: np.ndarray) -> np.ndarray:
+        stripped = np.full(prefix.shape, self.pad_id, dtype=prefix.dtype)
+        for row_i, row in enumerate(prefix):
+            kept = [int(token_id) for token_id in row if int(token_id) not in self.leak_label_ids]
+            kept = kept[: self.ply_expr]
+            stripped[row_i, : len(kept)] = kept
+        return stripped
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         sample_i = idx % len(self.samples)
         game_i, prefix_plies = (int(v) for v in self.samples[sample_i])
         start = int(self.offsets[game_i])
@@ -103,15 +114,20 @@ class BoardStateProbeDataset(Dataset):
             raise ValueError(f"invalid probe sample game={game_i} prefix_plies={prefix_plies}")
 
         prefix = self.moves[start : start + prefix_plies]
-        if len(prefix) >= self.context_plies:
-            x = prefix[-self.context_plies :]
+        target_ply = prefix[-1]
+        check = int((target_ply == self.check_id).any() or (target_ply == self.mate_id).any())
+        mate = int((target_ply == self.mate_id).any())
+        next_turn = 1 if prefix_plies % 2 == 1 else 0
+        prefix_x = self.strip_check_mate_tokens(prefix)
+        if len(prefix_x) >= self.context_plies:
+            x = prefix_x[-self.context_plies :]
         else:
             pad_rows = np.full(
                 (self.context_plies - len(prefix), self.ply_expr),
                 self.pad_id,
                 dtype=np.uint16,
             )
-            x = np.concatenate([pad_rows, prefix], axis=0)
+            x = np.concatenate([pad_rows, prefix_x], axis=0)
 
         board_row = start + prefix_plies - 1
         labels64 = unpack_board_labels(self.boards[board_row])
@@ -125,6 +141,10 @@ class BoardStateProbeDataset(Dataset):
             torch.from_numpy(x.astype(np.int64)),
             torch.from_numpy(square_ids),
             torch.from_numpy(labels),
+            torch.tensor(check, dtype=torch.long),
+            torch.tensor(mate, dtype=torch.long),
+            torch.tensor(next_turn, dtype=torch.long),
+            torch.tensor(prefix_plies, dtype=torch.long),
         )
 
 
@@ -154,10 +174,13 @@ class QBoardStateProbeTransformer(nn.Module):
             pad_id=pad_id,
         )
         self.board_head = DiffThinkerBoardStateQueryMLP(model_dim=model_dim, dropout=dropout)
+        self.check_head = DiffThinkerMLP(model_dim=model_dim, num_outputs=2, dropout=dropout)
+        self.mate_head = DiffThinkerMLP(model_dim=model_dim, num_outputs=2, dropout=dropout)
+        self.turn_head = DiffThinkerMLP(model_dim=model_dim, num_outputs=2, dropout=dropout)
 
-    def forward(self, x_ids: torch.Tensor, square_ids: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_ids: torch.Tensor, square_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         q = self.encoder(x_ids)
-        return self.board_head(q, square_ids)
+        return self.board_head(q, square_ids), self.check_head(q), self.mate_head(q), self.turn_head(q)
 
 
 def read_dotenv_key(path: Path = ROOT / ".env", key: str = "wandb_key") -> str | None:
@@ -242,12 +265,28 @@ def precision_recall(tp: int, pred_pos: int, pos: int) -> tuple[float, float]:
     return (tp / pred_pos if pred_pos else 0.0, tp / pos if pos else 0.0)
 
 
+def format_table(headers: list[str], rows: list[list[str]]) -> str:
+    widths = [len(header) for header in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+
+    def sep() -> str:
+        return "+" + "+".join("-" * (width + 2) for width in widths) + "+"
+
+    def fmt_row(row: list[str]) -> str:
+        return "| " + " | ".join(cell.rjust(widths[i]) for i, cell in enumerate(row)) + " |"
+
+    return "\n".join([sep(), fmt_row(headers), sep(), *(fmt_row(row) for row in rows), sep()])
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data" / "processed" / "lumbras" / "verifier")
     parser.add_argument("--board-state-dir", type=Path, default=None)
     parser.add_argument("--context-plies", type=int, default=128)
     parser.add_argument("--squares-per-position", type=int, default=16)
+    parser.add_argument("--bucket-plies", type=int, default=25, help="Bucket size for per-ply-range board/probe logs")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--grad-accum-steps", type=int, default=1)
     parser.add_argument("--epochs", type=int, default=1)
@@ -281,6 +320,8 @@ def main() -> int:
         raise ValueError("--print-every-batches must be >= 0")
     if not 1 <= args.squares_per_position <= NUM_SQUARES:
         raise ValueError("--squares-per-position must be in [1, 64]")
+    if args.bucket_plies < 1:
+        raise ValueError("--bucket-plies must be >= 1")
 
     wandb_run = init_wandb(args)
     run_id = checkpoint_run_id(wandb_run)
@@ -333,10 +374,26 @@ def main() -> int:
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     loss_window: deque[float] = deque(maxlen=args.log_window)
+    board_loss_window: deque[float] = deque(maxlen=args.log_window)
+    check_loss_window: deque[float] = deque(maxlen=args.log_window)
+    mate_loss_window: deque[float] = deque(maxlen=args.log_window)
+    turn_loss_window: deque[float] = deque(maxlen=args.log_window)
     acc_window: deque[float] = deque(maxlen=args.log_window)
     occupied_acc_window: deque[float] = deque(maxlen=args.log_window)
     occupied_precision_window: deque[float] = deque(maxlen=args.log_window)
     non_empty_recall_window: deque[float] = deque(maxlen=args.log_window)
+    check_acc_window: deque[float] = deque(maxlen=args.log_window)
+    mate_acc_window: deque[float] = deque(maxlen=args.log_window)
+    turn_acc_window: deque[float] = deque(maxlen=args.log_window)
+    check_tp_window: deque[int] = deque(maxlen=args.log_window)
+    check_pos_window: deque[int] = deque(maxlen=args.log_window)
+    check_pred_pos_window: deque[int] = deque(maxlen=args.log_window)
+    mate_tp_window: deque[int] = deque(maxlen=args.log_window)
+    mate_pos_window: deque[int] = deque(maxlen=args.log_window)
+    mate_pred_pos_window: deque[int] = deque(maxlen=args.log_window)
+    black_tp_window: deque[int] = deque(maxlen=args.log_window)
+    black_pos_window: deque[int] = deque(maxlen=args.log_window)
+    black_pred_pos_window: deque[int] = deque(maxlen=args.log_window)
     global_batch = 0
 
     for epoch in range(args.epochs):
@@ -344,14 +401,22 @@ def main() -> int:
         class_correct = torch.zeros(NUM_OCCUPANTS, dtype=torch.long)
         class_total = torch.zeros(NUM_OCCUPANTS, dtype=torch.long)
         class_pred_total = torch.zeros(NUM_OCCUPANTS, dtype=torch.long)
+        bucket_stats: dict[int, dict[str, int]] = {}
         pbar = tqdm(loader, desc=f"board-state q-probe epoch {epoch + 1}/{args.epochs}", unit="batch")
-        for step, (x, square_ids, labels) in enumerate(pbar, start=1):
+        for step, (x, square_ids, labels, check_y, mate_y, turn_y, probe_ply) in enumerate(pbar, start=1):
             global_batch += 1
             x = x.to(args.device, non_blocking=True)
             square_ids = square_ids.to(args.device, non_blocking=True)
             labels = labels.to(args.device, non_blocking=True)
-            logits = model(x, square_ids)
-            loss = F.cross_entropy(logits.reshape(-1, NUM_OCCUPANTS), labels.reshape(-1))
+            check_y = check_y.to(args.device, non_blocking=True)
+            mate_y = mate_y.to(args.device, non_blocking=True)
+            turn_y = turn_y.to(args.device, non_blocking=True)
+            logits, check_logits, mate_logits, turn_logits = model(x, square_ids)
+            board_loss = F.cross_entropy(logits.reshape(-1, NUM_OCCUPANTS), labels.reshape(-1))
+            check_loss = F.cross_entropy(check_logits, check_y)
+            mate_loss = F.cross_entropy(mate_logits, mate_y)
+            turn_loss = F.cross_entropy(turn_logits, turn_y)
+            loss = board_loss + check_loss + mate_loss + turn_loss
             (loss / args.grad_accum_steps).backward()
             if step % args.grad_accum_steps == 0 or step == len(loader):
                 nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -368,6 +433,10 @@ def main() -> int:
             occupied_precision = tp_occupied / pred_occupied.sum().item() if pred_occupied.any() else 0.0
             non_empty_recall = tp_occupied / occupied.sum().item() if occupied.any() else 0.0
             loss_window.append(float(loss.detach().cpu()))
+            board_loss_window.append(float(board_loss.detach().cpu()))
+            check_loss_window.append(float(check_loss.detach().cpu()))
+            mate_loss_window.append(float(mate_loss.detach().cpu()))
+            turn_loss_window.append(float(turn_loss.detach().cpu()))
             acc_window.append(acc)
             occupied_acc_window.append(occupied_acc)
             occupied_precision_window.append(occupied_precision)
@@ -379,29 +448,130 @@ def main() -> int:
             class_pred_total += batch_class_pred_total
             class_correct += batch_class_correct
 
+            check_pred = check_logits.argmax(dim=-1)
+            mate_pred = mate_logits.argmax(dim=-1)
+            turn_pred = turn_logits.argmax(dim=-1)
+            check_acc_window.append((check_pred == check_y).float().mean().item())
+            mate_acc_window.append((mate_pred == mate_y).float().mean().item())
+            turn_acc_window.append((turn_pred == turn_y).float().mean().item())
+            check_tp_window.append(int(((check_pred == 1) & (check_y == 1)).sum().detach().cpu()))
+            check_pos_window.append(int((check_y == 1).sum().detach().cpu()))
+            check_pred_pos_window.append(int((check_pred == 1).sum().detach().cpu()))
+            mate_tp_window.append(int(((mate_pred == 1) & (mate_y == 1)).sum().detach().cpu()))
+            mate_pos_window.append(int((mate_y == 1).sum().detach().cpu()))
+            mate_pred_pos_window.append(int((mate_pred == 1).sum().detach().cpu()))
+            black_tp_window.append(int(((turn_pred == 1) & (turn_y == 1)).sum().detach().cpu()))
+            black_pos_window.append(int((turn_y == 1).sum().detach().cpu()))
+            black_pred_pos_window.append(int((turn_pred == 1).sum().detach().cpu()))
+
+            sample_square_correct = correct.sum(dim=1).detach().cpu().tolist()
+            sample_occupied = occupied.sum(dim=1).detach().cpu().tolist()
+            sample_pred_occupied = pred_occupied.sum(dim=1).detach().cpu().tolist()
+            sample_occupied_correct = (correct & occupied).sum(dim=1).detach().cpu().tolist()
+            sample_check_y = check_y.detach().cpu().tolist()
+            sample_check_pred = check_pred.detach().cpu().tolist()
+            sample_mate_y = mate_y.detach().cpu().tolist()
+            sample_mate_pred = mate_pred.detach().cpu().tolist()
+            sample_turn_y = turn_y.detach().cpu().tolist()
+            sample_turn_pred = turn_pred.detach().cpu().tolist()
+            for i, bucket in enumerate(((probe_ply - 1) // args.bucket_plies).tolist()):
+                bucket = int(bucket)
+                stats = bucket_stats.setdefault(
+                    bucket,
+                    {
+                        "n": 0,
+                        "squares": 0,
+                        "square_correct": 0,
+                        "occupied": 0,
+                        "pred_occupied": 0,
+                        "occupied_correct": 0,
+                        "check_pos": 0,
+                        "check_pred_pos": 0,
+                        "check_tp": 0,
+                        "mate_pos": 0,
+                        "mate_pred_pos": 0,
+                        "mate_tp": 0,
+                        "black_pos": 0,
+                        "black_pred_pos": 0,
+                        "black_tp": 0,
+                        "turn_correct": 0,
+                    },
+                )
+                stats["n"] += 1
+                stats["squares"] += int(labels.shape[1])
+                stats["square_correct"] += int(sample_square_correct[i])
+                stats["occupied"] += int(sample_occupied[i])
+                stats["pred_occupied"] += int(sample_pred_occupied[i])
+                stats["occupied_correct"] += int(sample_occupied_correct[i])
+                stats["check_pos"] += int(sample_check_y[i] == 1)
+                stats["check_pred_pos"] += int(sample_check_pred[i] == 1)
+                stats["check_tp"] += int(sample_check_y[i] == 1 and sample_check_pred[i] == 1)
+                stats["mate_pos"] += int(sample_mate_y[i] == 1)
+                stats["mate_pred_pos"] += int(sample_mate_pred[i] == 1)
+                stats["mate_tp"] += int(sample_mate_y[i] == 1 and sample_mate_pred[i] == 1)
+                stats["black_pos"] += int(sample_turn_y[i] == 1)
+                stats["black_pred_pos"] += int(sample_turn_pred[i] == 1)
+                stats["black_tp"] += int(sample_turn_y[i] == 1 and sample_turn_pred[i] == 1)
+                stats["turn_correct"] += int(sample_turn_y[i] == sample_turn_pred[i])
+
             rolling_loss = sum(loss_window) / len(loss_window)
-            pbar.set_postfix(loss=rolling_loss, acc=sum(acc_window) / len(acc_window))
+            pbar.set_postfix(loss=rolling_loss, square_acc=sum(acc_window) / len(acc_window))
 
             if wandb_run is not None and (step % args.wandb_log_every == 0 or step == len(loader)):
                 occupied_total = int((class_total[1:]).sum())
                 occupied_correct = int((class_correct[1:]).sum())
+                check_pos = sum(check_pos_window)
+                check_pred_pos = sum(check_pred_pos_window)
+                mate_pos = sum(mate_pos_window)
+                mate_pred_pos = sum(mate_pred_pos_window)
+                black_pos = sum(black_pos_window)
+                black_pred_pos = sum(black_pred_pos_window)
+                black_tp = sum(black_tp_window)
                 log_payload = {
                     "train/loss": rolling_loss,
+                    "train/board_loss": sum(board_loss_window) / len(board_loss_window),
+                    "train/check_loss": sum(check_loss_window) / len(check_loss_window),
+                    "train/mate_loss": sum(mate_loss_window) / len(mate_loss_window),
+                    "train/turn_loss": sum(turn_loss_window) / len(turn_loss_window),
                     "train/square_acc": sum(acc_window) / len(acc_window),
                     "train/occupied_square_acc": sum(occupied_acc_window) / len(occupied_acc_window),
                     "train/occupied_precision": sum(occupied_precision_window) / len(occupied_precision_window),
                     "train/non_empty_recall": sum(non_empty_recall_window) / len(non_empty_recall_window),
                     "train/epoch_occupied_acc": occupied_correct / occupied_total if occupied_total else 0.0,
+                    "train/check_acc": sum(check_acc_window) / len(check_acc_window),
+                    "train/mate_acc": sum(mate_acc_window) / len(mate_acc_window),
+                    "train/turn_acc": sum(turn_acc_window) / len(turn_acc_window),
+                    "train/p_check": sum(check_tp_window) / check_pred_pos if check_pred_pos else 0.0,
+                    "train/r_check": sum(check_tp_window) / check_pos if check_pos else 0.0,
+                    "train/p_mate": sum(mate_tp_window) / mate_pred_pos if mate_pred_pos else 0.0,
+                    "train/r_mate": sum(mate_tp_window) / mate_pos if mate_pos else 0.0,
+                    "train/p_black": black_tp / black_pred_pos if black_pred_pos else 0.0,
+                    "train/r_black": black_tp / black_pos if black_pos else 0.0,
                     "epoch": epoch + 1,
                     "batch": step,
                 }
                 for cls, name in enumerate(OCCUPANT_NAMES):
                     total = int(class_total[cls])
                     pred_total = int(class_pred_total[cls])
-                    log_payload[f"class/{name}/acc"] = int(class_correct[cls]) / total if total else 0.0
+                    log_payload[f"class/{name}/recall"] = int(class_correct[cls]) / total if total else 0.0
                     log_payload[f"class/{name}/precision"] = int(class_correct[cls]) / pred_total if pred_total else 0.0
                     log_payload[f"class/{name}/n"] = total
                     log_payload[f"class/{name}/pred_n"] = pred_total
+                for bucket, stats in bucket_stats.items():
+                    lo = bucket * args.bucket_plies + 1
+                    hi = (bucket + 1) * args.bucket_plies
+                    prefix = f"bucket/{lo}_{hi}"
+                    log_payload[f"{prefix}/square_acc"] = stats["square_correct"] / stats["squares"] if stats["squares"] else 0.0
+                    log_payload[f"{prefix}/occupied_precision"] = stats["occupied_correct"] / stats["pred_occupied"] if stats["pred_occupied"] else 0.0
+                    log_payload[f"{prefix}/occupied_recall"] = stats["occupied_correct"] / stats["occupied"] if stats["occupied"] else 0.0
+                    log_payload[f"{prefix}/p_check"] = stats["check_tp"] / stats["check_pred_pos"] if stats["check_pred_pos"] else 0.0
+                    log_payload[f"{prefix}/r_check"] = stats["check_tp"] / stats["check_pos"] if stats["check_pos"] else 0.0
+                    log_payload[f"{prefix}/p_mate"] = stats["mate_tp"] / stats["mate_pred_pos"] if stats["mate_pred_pos"] else 0.0
+                    log_payload[f"{prefix}/r_mate"] = stats["mate_tp"] / stats["mate_pos"] if stats["mate_pos"] else 0.0
+                    log_payload[f"{prefix}/p_black"] = stats["black_tp"] / stats["black_pred_pos"] if stats["black_pred_pos"] else 0.0
+                    log_payload[f"{prefix}/r_black"] = stats["black_tp"] / stats["black_pos"] if stats["black_pos"] else 0.0
+                    log_payload[f"{prefix}/turn_acc"] = stats["turn_correct"] / stats["n"] if stats["n"] else 0.0
+                    log_payload[f"{prefix}/n"] = stats["n"]
                 wandb_run.log(log_payload, step=(epoch * len(loader)) + step)
 
             if step == 1 or (args.print_every_batches and step % args.print_every_batches == 0) or step == len(loader):
@@ -411,25 +581,85 @@ def main() -> int:
                 empty_total = int(class_total[EMPTY])
                 empty_pred_total = int(class_pred_total[EMPTY])
                 empty_correct = int(class_correct[EMPTY])
-                print(
-                    f"\nepoch={epoch + 1} batch={step}/{len(loader)} "
-                    f"loss={rolling_loss:.4f} square_acc={sum(acc_window) / len(acc_window):.4f} "
-                    f"empty_acc={(empty_correct / empty_total if empty_total else 0.0):.4f} "
-                    f"empty_precision={(empty_correct / empty_pred_total if empty_pred_total else 0.0):.4f} "
-                    f"occupied_acc={(occupied_correct / occupied_total if occupied_total else 0.0):.4f} "
-                    f"occupied_precision={(occupied_correct / occupied_pred_total if occupied_pred_total else 0.0):.4f} "
-                    f"non_empty_recall={sum(non_empty_recall_window) / len(non_empty_recall_window):.4f} "
-                    f"occupied_n={occupied_total} occupied_pred_n={occupied_pred_total} empty_n={empty_total} empty_pred_n={empty_pred_total}"
+                check_pos = sum(check_pos_window)
+                check_pred_pos = sum(check_pred_pos_window)
+                mate_pos = sum(mate_pos_window)
+                mate_pred_pos = sum(mate_pred_pos_window)
+                black_pos = sum(black_pos_window)
+                black_pred_pos = sum(black_pred_pos_window)
+                black_tp = sum(black_tp_window)
+                summary_table = format_table(
+                    ["metric", "value"],
+                    [
+                        ["loss", f"{rolling_loss:.4f}"],
+                        ["board_loss", f"{sum(board_loss_window) / len(board_loss_window):.4f}"],
+                        ["check_loss", f"{sum(check_loss_window) / len(check_loss_window):.4f}"],
+                        ["mate_loss", f"{sum(mate_loss_window) / len(mate_loss_window):.4f}"],
+                        ["turn_loss", f"{sum(turn_loss_window) / len(turn_loss_window):.4f}"],
+                        ["square_acc", f"{sum(acc_window) / len(acc_window):.4f}"],
+                        ["empty_precision", f"{(empty_correct / empty_pred_total if empty_pred_total else 0.0):.4f}"],
+                        ["empty_recall", f"{(empty_correct / empty_total if empty_total else 0.0):.4f}"],
+                        ["occupied_precision", f"{(occupied_correct / occupied_pred_total if occupied_pred_total else 0.0):.4f}"],
+                        ["occupied_recall", f"{(occupied_correct / occupied_total if occupied_total else 0.0):.4f}"],
+                        ["check_acc", f"{sum(check_acc_window) / len(check_acc_window):.4f}"],
+                        ["p_check", f"{(sum(check_tp_window) / check_pred_pos if check_pred_pos else 0.0):.4f}"],
+                        ["r_check", f"{(sum(check_tp_window) / check_pos if check_pos else 0.0):.4f}"],
+                        ["mate_acc", f"{sum(mate_acc_window) / len(mate_acc_window):.4f}"],
+                        ["p_mate", f"{(sum(mate_tp_window) / mate_pred_pos if mate_pred_pos else 0.0):.4f}"],
+                        ["r_mate", f"{(sum(mate_tp_window) / mate_pos if mate_pos else 0.0):.4f}"],
+                        ["turn_acc", f"{sum(turn_acc_window) / len(turn_acc_window):.4f}"],
+                        ["p_black", f"{(black_tp / black_pred_pos if black_pred_pos else 0.0):.4f}"],
+                        ["r_black", f"{(black_tp / black_pos if black_pos else 0.0):.4f}"],
+                        ["occupied_n", str(occupied_total)],
+                        ["occupied_pred_n", str(occupied_pred_total)],
+                        ["empty_n", str(empty_total)],
+                        ["empty_pred_n", str(empty_pred_total)],
+                    ],
                 )
-                rows = []
+                class_rows = []
                 for cls, name in enumerate(OCCUPANT_NAMES):
                     total = int(class_total[cls])
                     pred_total = int(class_pred_total[cls])
+                    correct_cls = int(class_correct[cls])
                     if total or pred_total:
-                        recall = int(class_correct[cls]) / total if total else 0.0
-                        precision = int(class_correct[cls]) / pred_total if pred_total else 0.0
-                        rows.append(f"{name}:p={precision:.3f},r={recall:.3f},n={total},pred={pred_total}")
-                pbar.write("class_precision_recall " + " ".join(rows))
+                        recall = correct_cls / total if total else 0.0
+                        precision = correct_cls / pred_total if pred_total else 0.0
+                        class_rows.append([name, f"{precision:.3f}", f"{recall:.3f}", str(correct_cls), str(total), str(pred_total)])
+                class_table = format_table(["class", "precision", "recall", "correct", "n", "pred_n"], class_rows)
+                bucket_rows = []
+                for bucket in sorted(bucket_stats):
+                    stats = bucket_stats[bucket]
+                    bucket_rows.append(
+                        [
+                            f"{bucket * args.bucket_plies + 1}-{(bucket + 1) * args.bucket_plies}",
+                            f"{(stats['square_correct'] / stats['squares'] if stats['squares'] else 0.0):.3f}",
+                            f"{(stats['occupied_correct'] / stats['pred_occupied'] if stats['pred_occupied'] else 0.0):.3f}",
+                            f"{(stats['occupied_correct'] / stats['occupied'] if stats['occupied'] else 0.0):.3f}",
+                            f"{(stats['check_tp'] / stats['check_pred_pos'] if stats['check_pred_pos'] else 0.0):.3f}",
+                            f"{(stats['check_tp'] / stats['check_pos'] if stats['check_pos'] else 0.0):.3f}",
+                            str(stats['check_pos']),
+                            str(stats['check_pred_pos']),
+                            f"{(stats['mate_tp'] / stats['mate_pred_pos'] if stats['mate_pred_pos'] else 0.0):.3f}",
+                            f"{(stats['mate_tp'] / stats['mate_pos'] if stats['mate_pos'] else 0.0):.3f}",
+                            str(stats['mate_pos']),
+                            str(stats['mate_pred_pos']),
+                            f"{(stats['black_tp'] / stats['black_pred_pos'] if stats['black_pred_pos'] else 0.0):.3f}",
+                            f"{(stats['black_tp'] / stats['black_pos'] if stats['black_pos'] else 0.0):.3f}",
+                            f"{(stats['turn_correct'] / stats['n'] if stats['n'] else 0.0):.3f}",
+                            str(stats['n']),
+                        ]
+                    )
+                bucket_table = format_table(
+                    ["plies", "sq_acc", "occ_p", "occ_r", "p_chk", "r_chk", "chk+", "chk_pred", "p_mate", "r_mate", "mate+", "mate_pred", "p_blk", "r_blk", "turn_a", "n"],
+                    bucket_rows,
+                )
+                pbar.write(
+                    f"\nepoch={epoch + 1} batch={step}/{len(loader)}\n"
+                    f"\nsummary\n{summary_table}\n"
+                    f"\noccupant classes\n{class_table}\n"
+                    f"\nply buckets\n{bucket_table}"
+                )
+                bucket_stats.clear()
 
             if args.snapshot_every_batches and step % args.snapshot_every_batches == 0:
                 snapshot_path = args.checkpoint_dir / f"board_state_q_probe_{run_id}_epoch_{epoch + 1:03d}_batch_{step:06d}.pt"

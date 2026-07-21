@@ -2,6 +2,7 @@ DATA_DIR="data/processed/lumbras/verifier"
 BOARD_STATE_DIR="data/processed/lumbras/verifier/board_state"
 CONTEXT_PLIES="128"
 SQUARES_PER_POSITION="16"
+BUCKET_PLIES="25"
 BATCH_SIZE="32"
 GRAD_ACCUM_STEPS="16"
 EPOCHS="1"
@@ -28,6 +29,7 @@ python scripts/train_board_state_q_probe.py \
   --board-state-dir "$BOARD_STATE_DIR" \
   --context-plies "$CONTEXT_PLIES" \
   --squares-per-position "$SQUARES_PER_POSITION" \
+  --bucket-plies "$BUCKET_PLIES" \
   --batch-size "$BATCH_SIZE" \
   --grad-accum-steps "$GRAD_ACCUM_STEPS" \
   --epochs "$EPOCHS" \
