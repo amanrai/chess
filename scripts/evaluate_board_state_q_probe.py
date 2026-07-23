@@ -158,11 +158,13 @@ def metric_row(name: str, stats: dict[str, int]) -> list[str]:
     exact = stats["exact_boards"] / stats["positions"] if stats["positions"] else 0.0
     occ_p = stats["occupied_correct"] / stats["pred_occupied"] if stats["pred_occupied"] else 0.0
     occ_r = stats["occupied_correct"] / stats["occupied"] if stats["occupied"] else 0.0
+    avg_wrong_squares = (stats["squares"] - stats["square_correct"]) / stats["positions"] if stats["positions"] else 0.0
     return [
         name,
         str(stats["positions"]),
         f"{sq_acc:.4f}",
         f"{exact:.4f}",
+        f"{avg_wrong_squares:.3f}",
         f"{occ_p:.4f}",
         f"{occ_r:.4f}",
         str(stats["occupied"]),
@@ -269,6 +271,7 @@ def main() -> int:
             **bucket_stats[bucket],
             "exact_square_acc": bucket_stats[bucket]["square_correct"] / bucket_stats[bucket]["squares"] if bucket_stats[bucket]["squares"] else 0.0,
             "exact_board_acc": bucket_stats[bucket]["exact_boards"] / bucket_stats[bucket]["positions"] if bucket_stats[bucket]["positions"] else 0.0,
+            "avg_wrong_squares": (bucket_stats[bucket]["squares"] - bucket_stats[bucket]["square_correct"]) / bucket_stats[bucket]["positions"] if bucket_stats[bucket]["positions"] else 0.0,
             "occupied_precision": bucket_stats[bucket]["occupied_correct"] / bucket_stats[bucket]["pred_occupied"] if bucket_stats[bucket]["pred_occupied"] else 0.0,
             "occupied_recall": bucket_stats[bucket]["occupied_correct"] / bucket_stats[bucket]["occupied"] if bucket_stats[bucket]["occupied"] else 0.0,
         })
@@ -289,9 +292,9 @@ def main() -> int:
     print(f"eval manifest kind: {manifest.get('kind')}")
     print(f"games evaluated: {len(game_indices)} / {len(offsets) - 1}")
     print("\noverall")
-    print(format_table(["bucket", "positions", "exact_square", "exact_board", "occ_p", "occ_r", "occ_n", "pred_occ_n"], [metric_row("all", overall)]))
+    print(format_table(["bucket", "positions", "exact_square", "exact_board", "avg_wrong_sq", "occ_p", "occ_r", "occ_n", "pred_occ_n"], [metric_row("all", overall)]))
     print("\nply buckets")
-    print(format_table(["plies", "positions", "exact_square", "exact_board", "occ_p", "occ_r", "occ_n", "pred_occ_n"], bucket_rows))
+    print(format_table(["plies", "positions", "exact_square", "exact_board", "avg_wrong_sq", "occ_p", "occ_r", "occ_n", "pred_occ_n"], bucket_rows))
     print("\noccupant classes")
     print(format_table(["class", "precision", "recall", "correct", "n", "pred_n"], class_rows))
 
@@ -309,6 +312,7 @@ def main() -> int:
                 **overall,
                 "exact_square_acc": overall["square_correct"] / overall["squares"] if overall["squares"] else 0.0,
                 "exact_board_acc": overall["exact_boards"] / overall["positions"] if overall["positions"] else 0.0,
+                "avg_wrong_squares": (overall["squares"] - overall["square_correct"]) / overall["positions"] if overall["positions"] else 0.0,
                 "occupied_precision": overall["occupied_correct"] / overall["pred_occupied"] if overall["pred_occupied"] else 0.0,
                 "occupied_recall": overall["occupied_correct"] / overall["occupied"] if overall["occupied"] else 0.0,
             },
