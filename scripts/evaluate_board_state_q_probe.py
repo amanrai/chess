@@ -128,7 +128,7 @@ def iter_positions(offsets: np.ndarray, game_indices: Iterable[int]) -> Iterable
             yield game_i, prefix_plies, start + prefix_plies - 1
 
 
-def empty_stats() -> dict[str, int]:
+def empty_stats() -> dict:
     return {
         "positions": 0,
         "squares": 0,
@@ -137,13 +137,15 @@ def empty_stats() -> dict[str, int]:
         "occupied": 0,
         "pred_occupied": 0,
         "occupied_correct": 0,
+        "wrong_square_hist": [0] * (NUM_SQUARES + 1),
     }
 
 
-def update_stats(stats: dict[str, int], pred: np.ndarray, labels: np.ndarray) -> None:
+def update_stats(stats: dict, pred: np.ndarray, labels: np.ndarray) -> None:
     correct = pred == labels
     occupied = labels != EMPTY
     pred_occupied = pred != EMPTY
+    wrong_counts = (~correct).sum(axis=1)
     stats["positions"] += int(labels.shape[0])
     stats["squares"] += int(labels.size)
     stats["square_correct"] += int(correct.sum())
@@ -151,20 +153,42 @@ def update_stats(stats: dict[str, int], pred: np.ndarray, labels: np.ndarray) ->
     stats["occupied"] += int(occupied.sum())
     stats["pred_occupied"] += int(pred_occupied.sum())
     stats["occupied_correct"] += int((correct & occupied).sum())
+    wrong_hist = np.bincount(wrong_counts, minlength=NUM_SQUARES + 1)
+    for i, count in enumerate(wrong_hist):
+        stats["wrong_square_hist"][i] += int(count)
 
 
-def metric_row(name: str, stats: dict[str, int]) -> list[str]:
+def percentile_from_hist(hist: list[int], percentile: float) -> int:
+    total = sum(hist)
+    if total <= 0:
+        return 0
+    threshold = percentile * total
+    cumulative = 0
+    for value, count in enumerate(hist):
+        cumulative += count
+        if cumulative >= threshold:
+            return value
+    return len(hist) - 1
+
+
+def metric_row(name: str, stats: dict) -> list[str]:
     sq_acc = stats["square_correct"] / stats["squares"] if stats["squares"] else 0.0
     exact = stats["exact_boards"] / stats["positions"] if stats["positions"] else 0.0
     occ_p = stats["occupied_correct"] / stats["pred_occupied"] if stats["pred_occupied"] else 0.0
     occ_r = stats["occupied_correct"] / stats["occupied"] if stats["occupied"] else 0.0
     avg_wrong_squares = (stats["squares"] - stats["square_correct"]) / stats["positions"] if stats["positions"] else 0.0
+    p50_wrong = percentile_from_hist(stats["wrong_square_hist"], 0.50)
+    p75_wrong = percentile_from_hist(stats["wrong_square_hist"], 0.75)
+    p90_wrong = percentile_from_hist(stats["wrong_square_hist"], 0.90)
     return [
         name,
         str(stats["positions"]),
         f"{sq_acc:.4f}",
         f"{exact:.4f}",
         f"{avg_wrong_squares:.3f}",
+        str(p50_wrong),
+        str(p75_wrong),
+        str(p90_wrong),
         f"{occ_p:.4f}",
         f"{occ_r:.4f}",
         str(stats["occupied"]),
@@ -265,15 +289,19 @@ def main() -> int:
         hi = (bucket + 1) * args.bucket_plies
         row = metric_row(f"{lo}-{hi}", bucket_stats[bucket])
         bucket_rows.append(row)
+        stats = bucket_stats[bucket]
         bucket_metrics_json.append({
             "plies_lo": lo,
             "plies_hi": hi,
-            **bucket_stats[bucket],
-            "exact_square_acc": bucket_stats[bucket]["square_correct"] / bucket_stats[bucket]["squares"] if bucket_stats[bucket]["squares"] else 0.0,
-            "exact_board_acc": bucket_stats[bucket]["exact_boards"] / bucket_stats[bucket]["positions"] if bucket_stats[bucket]["positions"] else 0.0,
-            "avg_wrong_squares": (bucket_stats[bucket]["squares"] - bucket_stats[bucket]["square_correct"]) / bucket_stats[bucket]["positions"] if bucket_stats[bucket]["positions"] else 0.0,
-            "occupied_precision": bucket_stats[bucket]["occupied_correct"] / bucket_stats[bucket]["pred_occupied"] if bucket_stats[bucket]["pred_occupied"] else 0.0,
-            "occupied_recall": bucket_stats[bucket]["occupied_correct"] / bucket_stats[bucket]["occupied"] if bucket_stats[bucket]["occupied"] else 0.0,
+            **stats,
+            "exact_square_acc": stats["square_correct"] / stats["squares"] if stats["squares"] else 0.0,
+            "exact_board_acc": stats["exact_boards"] / stats["positions"] if stats["positions"] else 0.0,
+            "avg_wrong_squares": (stats["squares"] - stats["square_correct"]) / stats["positions"] if stats["positions"] else 0.0,
+            "p50_wrong_squares": percentile_from_hist(stats["wrong_square_hist"], 0.50),
+            "p75_wrong_squares": percentile_from_hist(stats["wrong_square_hist"], 0.75),
+            "p90_wrong_squares": percentile_from_hist(stats["wrong_square_hist"], 0.90),
+            "occupied_precision": stats["occupied_correct"] / stats["pred_occupied"] if stats["pred_occupied"] else 0.0,
+            "occupied_recall": stats["occupied_correct"] / stats["occupied"] if stats["occupied"] else 0.0,
         })
 
     class_rows = []
@@ -292,9 +320,10 @@ def main() -> int:
     print(f"eval manifest kind: {manifest.get('kind')}")
     print(f"games evaluated: {len(game_indices)} / {len(offsets) - 1}")
     print("\noverall")
-    print(format_table(["bucket", "positions", "exact_square", "exact_board", "avg_wrong_sq", "occ_p", "occ_r", "occ_n", "pred_occ_n"], [metric_row("all", overall)]))
+    metric_headers = ["bucket", "positions", "exact_square", "exact_board", "avg_wrong_sq", "p50_wrong", "p75_wrong", "p90_wrong", "occ_p", "occ_r", "occ_n", "pred_occ_n"]
+    print(format_table(metric_headers, [metric_row("all", overall)]))
     print("\nply buckets")
-    print(format_table(["plies", "positions", "exact_square", "exact_board", "avg_wrong_sq", "occ_p", "occ_r", "occ_n", "pred_occ_n"], bucket_rows))
+    print(format_table(["plies", *metric_headers[1:]], bucket_rows))
     print("\noccupant classes")
     print(format_table(["class", "precision", "recall", "correct", "n", "pred_n"], class_rows))
 
@@ -313,6 +342,9 @@ def main() -> int:
                 "exact_square_acc": overall["square_correct"] / overall["squares"] if overall["squares"] else 0.0,
                 "exact_board_acc": overall["exact_boards"] / overall["positions"] if overall["positions"] else 0.0,
                 "avg_wrong_squares": (overall["squares"] - overall["square_correct"]) / overall["positions"] if overall["positions"] else 0.0,
+                "p50_wrong_squares": percentile_from_hist(overall["wrong_square_hist"], 0.50),
+                "p75_wrong_squares": percentile_from_hist(overall["wrong_square_hist"], 0.75),
+                "p90_wrong_squares": percentile_from_hist(overall["wrong_square_hist"], 0.90),
                 "occupied_precision": overall["occupied_correct"] / overall["pred_occupied"] if overall["pred_occupied"] else 0.0,
                 "occupied_recall": overall["occupied_correct"] / overall["occupied"] if overall["occupied"] else 0.0,
             },
