@@ -478,15 +478,15 @@ def main() -> int:
     black_tp_window: deque[int] = deque(maxlen=args.log_window)
     black_pos_window: deque[int] = deque(maxlen=args.log_window)
     black_pred_pos_window: deque[int] = deque(maxlen=args.log_window)
-    class_correct_window: deque[torch.Tensor] = deque(maxlen=args.log_window)
-    class_total_window: deque[torch.Tensor] = deque(maxlen=args.log_window)
-    class_pred_total_window: deque[torch.Tensor] = deque(maxlen=args.log_window)
 
     for epoch in range(start_epoch, args.epochs):
         model.train()
         class_correct = torch.zeros(NUM_OCCUPANTS, dtype=torch.long)
         class_total = torch.zeros(NUM_OCCUPANTS, dtype=torch.long)
         class_pred_total = torch.zeros(NUM_OCCUPANTS, dtype=torch.long)
+        print_class_correct = torch.zeros(NUM_OCCUPANTS, dtype=torch.long)
+        print_class_total = torch.zeros(NUM_OCCUPANTS, dtype=torch.long)
+        print_class_pred_total = torch.zeros(NUM_OCCUPANTS, dtype=torch.long)
         bucket_stats: dict[int, dict[str, int]] = {}
         epoch_resume_batch = resume_batch if epoch == start_epoch else 0
         epoch_resume_sample_offset = resume_sample_offset if epoch == start_epoch else 0
@@ -543,9 +543,9 @@ def main() -> int:
             class_total += batch_class_total
             class_pred_total += batch_class_pred_total
             class_correct += batch_class_correct
-            class_total_window.append(batch_class_total)
-            class_pred_total_window.append(batch_class_pred_total)
-            class_correct_window.append(batch_class_correct)
+            print_class_total += batch_class_total
+            print_class_pred_total += batch_class_pred_total
+            print_class_correct += batch_class_correct
 
             check_pred = check_logits.argmax(dim=-1)
             mate_pred = mate_logits.argmax(dim=-1)
@@ -674,15 +674,12 @@ def main() -> int:
                 wandb_run.log(log_payload, step=(epoch * num_batches) + step)
 
             if step == epoch_resume_batch + 1 or (args.print_every_batches and step % args.print_every_batches == 0) or step == num_batches:
-                rolling_class_total = torch.stack(list(class_total_window)).sum(dim=0)
-                rolling_class_pred_total = torch.stack(list(class_pred_total_window)).sum(dim=0)
-                rolling_class_correct = torch.stack(list(class_correct_window)).sum(dim=0)
-                occupied_total = int(rolling_class_total[1:].sum())
-                occupied_pred_total = int(rolling_class_pred_total[1:].sum())
-                occupied_correct = int(rolling_class_correct[1:].sum())
-                empty_total = int(rolling_class_total[EMPTY])
-                empty_pred_total = int(rolling_class_pred_total[EMPTY])
-                empty_correct = int(rolling_class_correct[EMPTY])
+                occupied_total = int(print_class_total[1:].sum())
+                occupied_pred_total = int(print_class_pred_total[1:].sum())
+                occupied_correct = int(print_class_correct[1:].sum())
+                empty_total = int(print_class_total[EMPTY])
+                empty_pred_total = int(print_class_pred_total[EMPTY])
+                empty_correct = int(print_class_correct[EMPTY])
                 check_pos = sum(check_pos_window)
                 check_pred_pos = sum(check_pred_pos_window)
                 mate_pos = sum(mate_pos_window)
@@ -720,9 +717,9 @@ def main() -> int:
                 )
                 class_rows = []
                 for cls, name in enumerate(OCCUPANT_NAMES):
-                    total = int(rolling_class_total[cls])
-                    pred_total = int(rolling_class_pred_total[cls])
-                    correct_cls = int(rolling_class_correct[cls])
+                    total = int(print_class_total[cls])
+                    pred_total = int(print_class_pred_total[cls])
+                    correct_cls = int(print_class_correct[cls])
                     if total or pred_total:
                         recall = correct_cls / total if total else 0.0
                         precision = correct_cls / pred_total if pred_total else 0.0
@@ -762,6 +759,9 @@ def main() -> int:
                     f"\nply buckets\n{bucket_table}"
                 )
                 bucket_stats.clear()
+                print_class_correct.zero_()
+                print_class_total.zero_()
+                print_class_pred_total.zero_()
 
             if args.snapshot_every_batches and step % args.snapshot_every_batches == 0:
                 snapshot_path = args.checkpoint_dir / f"board_state_q_probe_{run_id}_epoch_{epoch + 1:03d}_batch_{step:06d}.pt"
