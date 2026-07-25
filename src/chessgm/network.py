@@ -61,8 +61,8 @@ def apply_rope(x: torch.Tensor, ply_pos: torch.Tensor) -> torch.Tensor:
     inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2, device=x.device).float() / dim))
     freqs = torch.einsum("n,d->nd", ply_pos.float(), inv_freq)
     emb = torch.repeat_interleave(freqs, repeats=2, dim=-1)
-    cos = emb.cos()[None, None, :, :]
-    sin = emb.sin()[None, None, :, :]
+    cos = emb.cos().to(dtype=x.dtype)[None, None, :, :]
+    sin = emb.sin().to(dtype=x.dtype)[None, None, :, :]
     return (x * cos) + (rotate_half(x) * sin)
 
 
