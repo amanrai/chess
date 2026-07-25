@@ -268,8 +268,8 @@ def main() -> int:
     parser.add_argument("--bucket-plies", type=int, default=25, help="Bucket size for per-ply-range turn logs")
     parser.add_argument("--min-game-plies", type=int, default=None)
     parser.add_argument("--max-game-plies", type=int, default=None)
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--grad-accum-steps", type=int, default=64)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--grad-accum-steps", type=int, default=1)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
@@ -358,8 +358,7 @@ def main() -> int:
     )
     if args.init_checkpoint is not None:
         load_encoder_checkpoint(model, args.init_checkpoint)
-    model = model.to(device=args.device, dtype=torch.bfloat16)
-    print("model dtype: bfloat16")
+    model = model.to(args.device)
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     mate_loss_weight = torch.tensor([1.0, args.mate_positive_weight], dtype=torch.float32, device=args.device)
@@ -428,9 +427,9 @@ def main() -> int:
             )
             check_loss_weight = torch.tensor([1.0, current_check_positive_weight], dtype=torch.float32, device=args.device)
             check_logits, mate_logits, turn_logits = model(x)
-            check_loss = F.cross_entropy(check_logits.float(), check_y, weight=check_loss_weight)
-            mate_loss = F.cross_entropy(mate_logits.float(), mate_y, weight=mate_loss_weight)
-            turn_loss = F.cross_entropy(turn_logits.float(), turn_y)
+            check_loss = F.cross_entropy(check_logits, check_y, weight=check_loss_weight)
+            mate_loss = F.cross_entropy(mate_logits, mate_y, weight=mate_loss_weight)
+            turn_loss = F.cross_entropy(turn_logits, turn_y)
             loss = check_loss + mate_loss + turn_loss
             (loss / args.grad_accum_steps).backward()
 

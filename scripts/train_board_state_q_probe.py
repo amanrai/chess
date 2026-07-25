@@ -287,8 +287,8 @@ def main() -> int:
     parser.add_argument("--context-plies", type=int, default=128)
     parser.add_argument("--squares-per-position", type=int, default=16)
     parser.add_argument("--bucket-plies", type=int, default=25, help="Bucket size for per-ply-range board/probe logs")
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--grad-accum-steps", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--grad-accum-steps", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
@@ -359,7 +359,8 @@ def main() -> int:
     )
     if args.init_checkpoint is not None:
         load_encoder_checkpoint(model, args.init_checkpoint)
-    model = model.to(args.device)
+    model = model.to(device=args.device, dtype=torch.bfloat16)
+    print("model dtype: bfloat16")
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     encoder_params = sum(p.numel() for p in model.encoder.parameters())
@@ -394,6 +395,9 @@ def main() -> int:
     black_tp_window: deque[int] = deque(maxlen=args.log_window)
     black_pos_window: deque[int] = deque(maxlen=args.log_window)
     black_pred_pos_window: deque[int] = deque(maxlen=args.log_window)
+    class_correct_window: deque[torch.Tensor] = deque(maxlen=args.log_window)
+    class_total_window: deque[torch.Tensor] = deque(maxlen=args.log_window)
+    class_pred_total_window: deque[torch.Tensor] = deque(maxlen=args.log_window)
     global_batch = 0
 
     for epoch in range(args.epochs):
@@ -412,10 +416,10 @@ def main() -> int:
             mate_y = mate_y.to(args.device, non_blocking=True)
             turn_y = turn_y.to(args.device, non_blocking=True)
             logits, check_logits, mate_logits, turn_logits = model(x, square_ids)
-            board_loss = F.cross_entropy(logits.reshape(-1, NUM_OCCUPANTS), labels.reshape(-1))
-            check_loss = F.cross_entropy(check_logits, check_y)
-            mate_loss = F.cross_entropy(mate_logits, mate_y)
-            turn_loss = F.cross_entropy(turn_logits, turn_y)
+            board_loss = F.cross_entropy(logits.float().reshape(-1, NUM_OCCUPANTS), labels.reshape(-1))
+            check_loss = F.cross_entropy(check_logits.float(), check_y)
+            mate_loss = F.cross_entropy(mate_logits.float(), mate_y)
+            turn_loss = F.cross_entropy(turn_logits.float(), turn_y)
             loss = board_loss + check_loss + mate_loss + turn_loss
             (loss / args.grad_accum_steps).backward()
             if step % args.grad_accum_steps == 0 or step == len(loader):
@@ -447,6 +451,9 @@ def main() -> int:
             class_total += batch_class_total
             class_pred_total += batch_class_pred_total
             class_correct += batch_class_correct
+            class_total_window.append(batch_class_total)
+            class_pred_total_window.append(batch_class_pred_total)
+            class_correct_window.append(batch_class_correct)
 
             check_pred = check_logits.argmax(dim=-1)
             mate_pred = mate_logits.argmax(dim=-1)
@@ -575,12 +582,15 @@ def main() -> int:
                 wandb_run.log(log_payload, step=(epoch * len(loader)) + step)
 
             if step == 1 or (args.print_every_batches and step % args.print_every_batches == 0) or step == len(loader):
-                occupied_total = int(class_total[1:].sum())
-                occupied_pred_total = int(class_pred_total[1:].sum())
-                occupied_correct = int(class_correct[1:].sum())
-                empty_total = int(class_total[EMPTY])
-                empty_pred_total = int(class_pred_total[EMPTY])
-                empty_correct = int(class_correct[EMPTY])
+                rolling_class_total = torch.stack(list(class_total_window)).sum(dim=0)
+                rolling_class_pred_total = torch.stack(list(class_pred_total_window)).sum(dim=0)
+                rolling_class_correct = torch.stack(list(class_correct_window)).sum(dim=0)
+                occupied_total = int(rolling_class_total[1:].sum())
+                occupied_pred_total = int(rolling_class_pred_total[1:].sum())
+                occupied_correct = int(rolling_class_correct[1:].sum())
+                empty_total = int(rolling_class_total[EMPTY])
+                empty_pred_total = int(rolling_class_pred_total[EMPTY])
+                empty_correct = int(rolling_class_correct[EMPTY])
                 check_pos = sum(check_pos_window)
                 check_pred_pos = sum(check_pred_pos_window)
                 mate_pos = sum(mate_pos_window)
@@ -618,9 +628,9 @@ def main() -> int:
                 )
                 class_rows = []
                 for cls, name in enumerate(OCCUPANT_NAMES):
-                    total = int(class_total[cls])
-                    pred_total = int(class_pred_total[cls])
-                    correct_cls = int(class_correct[cls])
+                    total = int(rolling_class_total[cls])
+                    pred_total = int(rolling_class_pred_total[cls])
+                    correct_cls = int(rolling_class_correct[cls])
                     if total or pred_total:
                         recall = correct_cls / total if total else 0.0
                         precision = correct_cls / pred_total if pred_total else 0.0
