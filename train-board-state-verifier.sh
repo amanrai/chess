@@ -20,6 +20,7 @@ CHECKPOINT_DIR="checkpoints/board_state_q_probe_256d_48q"
 SNAPSHOT_EVERY_BATCHES="10000"
 LOG_WINDOW="1000"
 PRINT_EVERY_BATCHES="25"
+SEED="0"
 WANDB_FLAG="--wandb"
 WANDB_PROJECT="chess-gm"
 WANDB_LOG_EVERY="100"
@@ -47,6 +48,7 @@ python scripts/train_board_state_q_probe.py \
   --snapshot-every-batches "$SNAPSHOT_EVERY_BATCHES" \
   --log-window "$LOG_WINDOW" \
   --print-every-batches "$PRINT_EVERY_BATCHES" \
+  --seed "$SEED" \
   $WANDB_FLAG \
   --wandb-project "$WANDB_PROJECT" \
   --wandb-log-every "$WANDB_LOG_EVERY"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import random
 import re
@@ -18,7 +19,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 from tqdm.auto import tqdm
 
 from chessgm.network_q import DiffThinkerBoardStateQueryMLP, DiffThinkerMLP, QFormerPlyHistoryEncoder
@@ -148,6 +149,31 @@ class BoardStateProbeDataset(Dataset):
         )
 
 
+class AffineShuffleSampler(Sampler[int]):
+    """Deterministic resumable permutation sampler without materializing randperm."""
+
+    def __init__(self, dataset: Dataset, *, seed: int, start: int = 0):
+        self.n = len(dataset)
+        self.start = min(max(int(start), 0), self.n)
+        rng = random.Random(seed)
+        if self.n <= 1:
+            self.a = 1
+            self.b = 0
+        else:
+            while True:
+                self.a = rng.randrange(1, self.n)
+                if math.gcd(self.a, self.n) == 1:
+                    break
+            self.b = rng.randrange(self.n)
+
+    def __iter__(self):
+        for i in range(self.start, self.n):
+            yield (self.a * i + self.b) % self.n
+
+    def __len__(self) -> int:
+        return self.n - self.start
+
+
 class QBoardStateProbeTransformer(nn.Module):
     def __init__(
         self,
@@ -241,6 +267,7 @@ def save_checkpoint(
             "epoch": epoch,
             "batch": batch,
             "global_batch": global_batch,
+            "epoch_sample_offset": batch * int(getattr(args, "batch_size", 1)),
             "run_id": run_id,
         },
         path,
@@ -258,6 +285,33 @@ def load_encoder_checkpoint(model: QBoardStateProbeTransformer, path: Path) -> N
     print(
         f"loaded encoder weights from {path}: compatible={len(compatible)} "
         f"missing={len(missing)} unexpected={len(unexpected)}"
+    )
+
+
+def latest_checkpoint(checkpoint_dir: Path) -> Path | None:
+    paths = sorted(checkpoint_dir.glob("board_state_q_probe_*.pt"), key=lambda p: p.stat().st_mtime)
+    return paths[-1] if paths else None
+
+
+def load_training_checkpoint(
+    path: Path,
+    *,
+    model: nn.Module,
+    opt: torch.optim.Optimizer,
+    device: str,
+) -> tuple[int, int, int, int, str | None]:
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    model.load_state_dict(ckpt["model"])
+    opt.load_state_dict(ckpt["optimizer"])
+    ckpt_args = ckpt.get("args", {})
+    ckpt_batch = int(ckpt.get("batch", 0))
+    ckpt_batch_size = int(ckpt_args.get("batch_size", 1))
+    return (
+        int(ckpt.get("epoch", 1)),
+        ckpt_batch,
+        int(ckpt.get("global_batch", 0)),
+        int(ckpt.get("epoch_sample_offset", ckpt_batch * ckpt_batch_size)),
+        ckpt.get("run_id"),
     )
 
 
@@ -303,6 +357,9 @@ def main() -> int:
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--init-checkpoint", type=Path, default=None, help="Optional q-probe checkpoint to initialize the shared encoder")
     parser.add_argument("--checkpoint-dir", type=Path, default=ROOT / "checkpoints" / "board_state_q_probe")
+    parser.add_argument("--resume-checkpoint", type=Path, default=None, help="Explicit training checkpoint to resume. Default: latest in --checkpoint-dir when --resume is enabled")
+    parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True, help="Resume from the latest checkpoint in --checkpoint-dir when available")
+    parser.add_argument("--seed", type=int, default=0, help="Deterministic shuffle/probe seed used for resumable training")
     parser.add_argument("--snapshot-every-batches", type=int, default=5000, help="Save an in-epoch snapshot every N batches; 0 disables")
     parser.add_argument("--log-window", type=int, default=1000)
     parser.add_argument("--print-every-batches", type=int, default=25)
@@ -333,19 +390,13 @@ def main() -> int:
         context_plies=args.context_plies,
         squares_per_position=args.squares_per_position,
         examples_per_epoch=args.examples_per_epoch,
-        seed=0,
+        seed=args.seed,
     )
     print(
         f"dataset: samples={len(dataset.samples):,} examples_per_epoch={len(dataset):,} "
         f"context_plies={args.context_plies} squares_per_position={args.squares_per_position}"
     )
-    loader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        pin_memory=args.device.startswith("cuda"),
-    )
+    num_batches = math.ceil(len(dataset) / args.batch_size)
 
     model = QBoardStateProbeTransformer(
         vocab_size=len(VOCAB),
@@ -374,6 +425,38 @@ def main() -> int:
     )
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    start_epoch = 0
+    resume_batch = 0
+    resume_sample_offset = 0
+    global_batch = 0
+    resume_path = args.resume_checkpoint if args.resume_checkpoint is not None else (latest_checkpoint(args.checkpoint_dir) if args.resume else None)
+    if resume_path is not None:
+        ckpt_epoch, ckpt_batch, global_batch, ckpt_sample_offset, ckpt_run_id = load_training_checkpoint(
+            resume_path,
+            model=model,
+            opt=opt,
+            device=args.device,
+        )
+        if ckpt_run_id:
+            run_id = ckpt_run_id
+        if ckpt_sample_offset >= len(dataset):
+            start_epoch = ckpt_epoch
+            resume_batch = 0
+            resume_sample_offset = 0
+        else:
+            start_epoch = max(ckpt_epoch - 1, 0)
+            resume_sample_offset = ckpt_sample_offset
+            resume_batch = resume_sample_offset // args.batch_size
+        print(
+            f"resumed checkpoint: {resume_path} epoch={ckpt_epoch} batch={ckpt_batch} "
+            f"global_batch={global_batch} next_epoch={start_epoch + 1} "
+            f"resume_sample_offset={resume_sample_offset} run_id={run_id}"
+        )
+    else:
+        print("resume: no checkpoint found; starting fresh")
+
     loss_window: deque[float] = deque(maxlen=args.log_window)
     board_loss_window: deque[float] = deque(maxlen=args.log_window)
     check_loss_window: deque[float] = deque(maxlen=args.log_window)
@@ -398,16 +481,25 @@ def main() -> int:
     class_correct_window: deque[torch.Tensor] = deque(maxlen=args.log_window)
     class_total_window: deque[torch.Tensor] = deque(maxlen=args.log_window)
     class_pred_total_window: deque[torch.Tensor] = deque(maxlen=args.log_window)
-    global_batch = 0
 
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         model.train()
         class_correct = torch.zeros(NUM_OCCUPANTS, dtype=torch.long)
         class_total = torch.zeros(NUM_OCCUPANTS, dtype=torch.long)
         class_pred_total = torch.zeros(NUM_OCCUPANTS, dtype=torch.long)
         bucket_stats: dict[int, dict[str, int]] = {}
+        epoch_resume_batch = resume_batch if epoch == start_epoch else 0
+        epoch_resume_sample_offset = resume_sample_offset if epoch == start_epoch else 0
+        sampler = AffineShuffleSampler(dataset, seed=args.seed + epoch, start=epoch_resume_sample_offset)
+        loader = DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            sampler=sampler,
+            num_workers=args.num_workers,
+            pin_memory=args.device.startswith("cuda"),
+        )
         pbar = tqdm(loader, desc=f"board-state q-probe epoch {epoch + 1}/{args.epochs}", unit="batch")
-        for step, (x, square_ids, labels, check_y, mate_y, turn_y, probe_ply) in enumerate(pbar, start=1):
+        for step, (x, square_ids, labels, check_y, mate_y, turn_y, probe_ply) in enumerate(pbar, start=epoch_resume_batch + 1):
             global_batch += 1
             x = x.to(args.device, non_blocking=True)
             square_ids = square_ids.to(args.device, non_blocking=True)
@@ -422,7 +514,7 @@ def main() -> int:
             turn_loss = F.cross_entropy(turn_logits.float(), turn_y)
             loss = board_loss + check_loss + mate_loss + turn_loss
             (loss / args.grad_accum_steps).backward()
-            if step % args.grad_accum_steps == 0 or step == len(loader):
+            if step % args.grad_accum_steps == 0 or step == num_batches:
                 nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 opt.step()
                 opt.zero_grad(set_to_none=True)
@@ -524,7 +616,7 @@ def main() -> int:
             rolling_loss = sum(loss_window) / len(loss_window)
             pbar.set_postfix(loss=rolling_loss, square_acc=sum(acc_window) / len(acc_window))
 
-            if wandb_run is not None and (step % args.wandb_log_every == 0 or step == len(loader)):
+            if wandb_run is not None and (step % args.wandb_log_every == 0 or step == num_batches):
                 occupied_total = int((class_total[1:]).sum())
                 occupied_correct = int((class_correct[1:]).sum())
                 check_pos = sum(check_pos_window)
@@ -579,9 +671,9 @@ def main() -> int:
                     log_payload[f"{prefix}/r_black"] = stats["black_tp"] / stats["black_pos"] if stats["black_pos"] else 0.0
                     log_payload[f"{prefix}/turn_acc"] = stats["turn_correct"] / stats["n"] if stats["n"] else 0.0
                     log_payload[f"{prefix}/n"] = stats["n"]
-                wandb_run.log(log_payload, step=(epoch * len(loader)) + step)
+                wandb_run.log(log_payload, step=(epoch * num_batches) + step)
 
-            if step == 1 or (args.print_every_batches and step % args.print_every_batches == 0) or step == len(loader):
+            if step == epoch_resume_batch + 1 or (args.print_every_batches and step % args.print_every_batches == 0) or step == num_batches:
                 rolling_class_total = torch.stack(list(class_total_window)).sum(dim=0)
                 rolling_class_pred_total = torch.stack(list(class_pred_total_window)).sum(dim=0)
                 rolling_class_correct = torch.stack(list(class_correct_window)).sum(dim=0)
@@ -664,7 +756,7 @@ def main() -> int:
                     bucket_rows,
                 )
                 pbar.write(
-                    f"\nepoch={epoch + 1} batch={step}/{len(loader)}\n"
+                    f"\nepoch={epoch + 1} batch={step}/{num_batches}\n"
                     f"\nsummary\n{summary_table}\n"
                     f"\noccupant classes\n{class_table}\n"
                     f"\nply buckets\n{bucket_table}"
@@ -692,7 +784,7 @@ def main() -> int:
             opt=opt,
             args=args,
             epoch=epoch + 1,
-            batch=len(loader),
+            batch=num_batches,
             global_batch=global_batch,
             run_id=run_id,
         )
