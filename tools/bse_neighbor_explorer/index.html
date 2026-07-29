@@ -110,6 +110,8 @@
           <div class="control"><label><input id="excludeSame" type="checkbox" checked /> exclude same game</label></div>
           <button class="btn green" id="sampleBtn">Sample move</button>
           <button class="btn" id="searchBtn">Search</button>
+          <button class="btn ghost" id="bothPrev">← prev ply</button>
+          <button class="btn ghost" id="bothNext">next ply →</button>
           <button class="btn ghost" id="analyzeBtn">Analyze</button>
         </div>
       </div>
@@ -118,13 +120,13 @@
         <div class="panel">
           <div class="panel-head"><h3>Query game</h3><div class="meta" id="leftMeta">none</div></div>
           <div class="panel-body">
-            <div class="board-row"><div class="board" id="leftBoard"></div><div class="details"><div class="kv" id="leftDetails"></div><div class="scrub"><button class="btn ghost" id="leftPrev">←</button><input id="leftPly" type="number" min="1" /><button class="btn ghost" id="leftNext">→</button><button class="btn orange" id="leftLoad">Load ply</button></div></div></div>
+            <div class="board-row"><div class="board" id="leftBoard"></div><div class="details"><div class="kv" id="leftDetails"></div><div class="scrub"><input id="leftPly" type="number" min="1" /><button class="btn orange" id="leftLoad">Load query ply</button></div></div></div>
           </div>
         </div>
         <div class="panel">
           <div class="panel-head"><h3>Neighbor game</h3><div class="meta" id="rightMeta">none</div></div>
           <div class="panel-body">
-            <div class="board-row"><div class="board" id="rightBoard"></div><div class="details"><div class="kv" id="rightDetails"></div><div class="scrub"><button class="btn ghost" id="rightPrev">←</button><input id="rightPly" type="number" min="1" /><button class="btn ghost" id="rightNext">→</button><button class="btn orange" id="rightLoad">Load ply</button></div></div></div>
+            <div class="board-row"><div class="board" id="rightBoard"></div><div class="details"><div class="kv" id="rightDetails"></div><div class="scrub"><input id="rightPly" type="number" min="1" /><button class="btn orange" id="rightLoad">Load neighbor ply</button></div></div></div>
           </div>
         </div>
       </section>
@@ -200,6 +202,15 @@ async function moveSide(side, delta){
   const ply = Math.max(1, Math.min(pos.terminal_ply, pos.ply + delta));
   await loadPosition(side, pos.game_id, ply);
 }
+async function moveBoth(delta){
+  const ops = [];
+  if(state.left) ops.push(moveSide('left', delta));
+  if(state.right) ops.push(moveSide('right', delta));
+  if(!ops.length) return;
+  setStatus(delta > 0 ? 'Advancing both games…' : 'Rewinding both games…');
+  await Promise.all(ops);
+  setStatus('Moved both visible games. Search again to retrieve neighbors from the new query ply.');
+}
 function renderNeighborPills(){
   const el = $('neighborPills'); el.innerHTML='';
   state.neighbors.forEach((n,i)=>{
@@ -268,8 +279,8 @@ async function init(){
 $('sampleBtn').onclick=()=>sample().catch(e=>setStatus(e.message));
 $('searchBtn').onclick=()=>search().catch(e=>setStatus(e.message));
 $('analyzeBtn').onclick=()=>{ analyzeSide('left').catch(e=>$('leftAnalysis').textContent=e.message); analyzeSide('right').catch(e=>$('rightAnalysis').textContent=e.message); };
-$('leftPrev').onclick=()=>moveSide('left',-1).catch(e=>setStatus(e.message)); $('leftNext').onclick=()=>moveSide('left',1).catch(e=>setStatus(e.message));
-$('rightPrev').onclick=()=>moveSide('right',-1).catch(e=>setStatus(e.message)); $('rightNext').onclick=()=>moveSide('right',1).catch(e=>setStatus(e.message));
+$('bothPrev').onclick=()=>moveBoth(-1).catch(e=>setStatus(e.message));
+$('bothNext').onclick=()=>moveBoth(1).catch(e=>setStatus(e.message));
 $('leftLoad').onclick=()=>state.left && loadPosition('left', state.left.game_id, parseInt($('leftPly').value,10)).catch(e=>setStatus(e.message));
 $('rightLoad').onclick=()=>state.right && loadPosition('right', state.right.game_id, parseInt($('rightPly').value,10)).catch(e=>setStatus(e.message));
 init().catch(e=>setStatus(e.message));
