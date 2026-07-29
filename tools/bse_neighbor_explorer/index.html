@@ -137,7 +137,7 @@
       </div>
 
       <section class="analysis">
-        <div class="panel analysis-wide"><div class="panel-head"><h3>Post-search Stockfish comparison</h3><div class="meta">query + top 5 neighbors</div></div><div class="panel-body" id="comparisonPanel">No comparison yet.</div></div>
+        <div class="panel analysis-wide"><div class="panel-head"><h3>Stockfish comparison</h3><div class="meta">query + selected neighbor</div></div><div class="panel-body" id="comparisonPanel">No comparison yet.</div></div>
         <div class="panel"><div class="panel-head"><h3>Left analysis</h3><div class="meta">python-chess + Stockfish if configured</div></div><div class="panel-body"><pre id="leftAnalysis">No analysis yet.</pre></div></div>
         <div class="panel"><div class="panel-head"><h3>Right analysis</h3><div class="meta">selected neighbor</div></div><div class="panel-body"><pre id="rightAnalysis">No analysis yet.</pre></div></div>
       </section>
@@ -217,7 +217,7 @@ function renderNeighborPills(){
     const b=document.createElement('button'); b.className='pill'+(i===state.neighborIndex?' active':'');
     const score = n.cosine !== undefined ? `cos ${n.cosine.toFixed(4)}` : `l2 ${n.l2.toFixed(2)}`;
     b.textContent = `#${i+1} g${n.game_id} p${n.ply} · ${score}`;
-    b.onclick=()=>{ state.neighborIndex=i; renderSide('right', n.position); renderNeighborPills(); };
+    b.onclick=()=>{ state.neighborIndex=i; renderSide('right', n.position); renderNeighborPills(); compareSelected().catch(e=>setStatus('Comparison failed: '+e.message)); };
     el.appendChild(b);
   });
 }
@@ -239,14 +239,14 @@ async function search(){
   state.neighbors = data.results; state.neighborIndex=0;
   if(state.neighbors.length) renderSide('right', state.neighbors[0].position);
   renderNeighborPills(); setStatus(`Loaded ${state.neighbors.length} neighbors. Running Stockfish comparison…`);
-  compareSearchResults().catch(e=>setStatus('Search loaded; comparison failed: '+e.message));
+  compareSelected().catch(e=>setStatus('Search loaded; comparison failed: '+e.message));
 }
 function renderComparison(rows){
   if(!rows || !rows.length){ $('comparisonPanel').textContent='No comparison.'; return; }
   const html = ['<table class="comparison-table"><thead><tr><th>row</th><th>game / ply</th><th>eval</th><th>best</th><th>played next</th><th>rank</th><th>swing</th><th>pv</th></tr></thead><tbody>'];
   rows.forEach((r,i)=>{
     const sf = r.stockfish || {}; const best = sf.best || {}; const pos = r.position || {};
-    const label = i===0 ? 'query' : `#${i}`;
+    const label = i===0 ? 'query' : 'selected';
     const evalText = sf.available ? (best.mate ? `M${best.mate}` : `${best.score_cp ?? '—'} cp`) : 'no engine';
     const swing = sf.eval_swing_cp_vs_best === null || sf.eval_swing_cp_vs_best === undefined ? '—' : `${sf.eval_swing_cp_vs_best} cp`;
     const pv = best.pv_uci ? best.pv_uci.slice(0,5).join(' ') : '—';
@@ -254,12 +254,12 @@ function renderComparison(rows){
   });
   html.push('</tbody></table>'); $('comparisonPanel').innerHTML = html.join('');
 }
-async function compareSearchResults(){
-  if(!state.left || !state.neighbors.length) return;
-  const positions = [{game_id:state.left.game_id, ply:state.left.ply}, ...state.neighbors.map(n=>({game_id:n.game_id, ply:n.ply}))];
-  $('comparisonPanel').textContent = 'Running Stockfish on query + top 5…';
+async function compareSelected(){
+  if(!state.left || !state.right) return;
+  const positions = [{game_id:state.left.game_id, ply:state.left.ply}, {game_id:state.right.game_id, ply:state.right.ply}];
+  $('comparisonPanel').textContent = 'Running Stockfish on query + selected neighbor…';
   const data = await api('/api/analyze_many', {method:'POST', body:JSON.stringify({positions, depth:10, movetime_ms:150, multipv:5, eval_played_move:true})});
-  renderComparison(data.analyses); setStatus(`Loaded ${state.neighbors.length} neighbors and Stockfish comparison.`);
+  renderComparison(data.analyses); setStatus('Loaded Stockfish comparison for selected neighbor.');
 }
 async function analyzeSide(side){
   const pos = state[side]; if(!pos) return;
