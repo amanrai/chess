@@ -9,7 +9,9 @@ set -euo pipefail
 # Or set:
 #   BSE_NEIGHBOR_PGNS="path/a.pgn path/b.pgn" ./build_bse_neighbor_index.sh
 #
-# If no PGNs are provided, this script tries to auto-discover files under
+# If no PGNs are provided, this script uses the held-out 2000-2199 eval PGN
+# when present, which is the currently available 1800-2200-ish source on the
+# target box. If that is missing, it tries to auto-discover files under
 # data/processed/lumbras with names containing 1800 and 2200.
 
 if [[ "$#" -gt 0 ]]; then
@@ -17,21 +19,22 @@ if [[ "$#" -gt 0 ]]; then
 elif [[ -n "${BSE_NEIGHBOR_PGNS:-}" ]]; then
   # shellcheck disable=SC2206
   PGNS=(${BSE_NEIGHBOR_PGNS})
+elif [[ -f data/processed/lumbras/eval_board_state_2000_2199/games.pgn ]]; then
+  PGNS=(data/processed/lumbras/eval_board_state_2000_2199/games.pgn)
 else
   mapfile -t PGNS < <(find data/processed/lumbras -type f -name '*.pgn' \
-    | grep -Ei '1800.*2200|2200.*1800' \
+    | grep -Ei '1800.*2200|2200.*1800|2000.*2199|2199.*2000' \
     | sort)
 fi
 
 if [[ "${#PGNS[@]}" -eq 0 ]]; then
   cat >&2 <<'EOF'
-No 1800-2200 PGN files were provided or auto-discovered.
+No suitable 1800-2200 / 2000-2199 PGN files were provided or auto-discovered.
 
 Run with explicit PGNs, for example:
 
   ./build_bse_neighbor_index.sh \
-    data/processed/lumbras/lumbras_otb_both_1800_to_1999.pgn \
-    data/processed/lumbras/lumbras_otb_both_2000_to_2200.pgn
+    data/processed/lumbras/eval_board_state_2000_2199/games.pgn
 
 Or:
 
