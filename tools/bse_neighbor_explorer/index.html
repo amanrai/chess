@@ -179,7 +179,7 @@ function detailHtml(pos){
   if(!pos) return '';
   const h = pos.headers || {};
   const fields = [
-    ['game', pos.game_id], ['ply', `${pos.ply} / ${pos.terminal_ply}`], ['turn', pos.turn],
+    ['game', pos.game_id], ['ply', `${pos.ply} / ${pos.terminal_ply}`], ['next to play', pos.next_to_play || pos.turn],
     ['event', h.Event || ''], ['white', `${h.White || ''} ${h.WhiteElo || ''}`], ['black', `${h.Black || ''} ${h.BlackElo || ''}`],
     ['last', pos.last_move_san || '—'], ['next', pos.next_move_san || '—'], ['check', pos.is_check ? 'yes' : 'no'],
     ['legal', pos.legal_move_count], ['fen', pos.fen]

@@ -250,6 +250,7 @@ def board_payload(state: ExplorerState, game_id: int, ply: int) -> dict[str, Any
         "fen": board.fen(),
         "board_fen": board.board_fen(),
         "turn": "white" if board.turn == chess.WHITE else "black",
+        "next_to_play": "black" if ply % 2 == 1 else "white",
         "is_check": board.is_check(),
         "is_checkmate": board.is_checkmate(),
         "legal_move_count": board.legal_moves.count(),
