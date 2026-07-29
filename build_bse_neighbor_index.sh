@@ -52,4 +52,5 @@ uv run python scripts/build_bse_neighbor_index.py \
   --min-elo 1800 \
   --max-elo 2200 \
   --bucket-plies 5 \
-  --device cuda
+  --max-games "${BSE_NEIGHBOR_MAX_GAMES:-250000}" \
+  --device "${BSE_NEIGHBOR_DEVICE:-cuda}"
