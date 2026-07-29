@@ -106,7 +106,7 @@
         <div class="controls">
           <div class="control"><label>sample</label><select id="sampleMode"><option value="random">pure random</option><option value="bucket">bucket</option></select></div>
           <div class="control"><label>bucket</label><select id="bucketSelect"></select></div>
-          <div class="control"><label>distance</label><select id="distance"><option value="cosine">cosine</option><option value="l2">raw L2</option></select></div>
+          <div class="control"><label>distance</label><select id="distance"><option value="cosine">cosine</option><option value="l2">RMS</option></select></div>
           <div class="control"><label><input id="excludeSame" type="checkbox" checked /> exclude same game</label></div>
           <button class="btn green" id="sampleBtn">Sample move</button>
           <button class="btn" id="searchBtn">Search</button>
@@ -215,7 +215,7 @@ function renderNeighborPills(){
   const el = $('neighborPills'); el.innerHTML='';
   state.neighbors.forEach((n,i)=>{
     const b=document.createElement('button'); b.className='pill'+(i===state.neighborIndex?' active':'');
-    const score = n.cosine !== undefined ? `cos ${n.cosine.toFixed(4)}` : `l2 ${n.l2.toFixed(2)}`;
+    const score = n.cosine !== undefined ? `cos ${n.cosine.toFixed(4)}` : `rms ${n.rms.toFixed(4)}`;
     b.textContent = `#${i+1} g${n.game_id} p${n.ply} · ${score}`;
     b.onclick=()=>{ state.neighborIndex=i; renderSide('right', n.position); renderNeighborPills(); compareSelected().catch(e=>setStatus('Comparison failed: '+e.message)); };
     el.appendChild(b);

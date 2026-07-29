@@ -313,17 +313,21 @@ def brute_force_search(state: ExplorerState, req: SearchRequest) -> list[dict[st
             continue
         seen_games.add(gid)
         ply = int(meta["ply"])
-        out.append(
-            {
-                "rank": len(out) + 1,
-                "row": int(row_i),
-                "game_id": gid,
-                "ply": ply,
-                "is_terminal": bool(meta["is_terminal"]),
-                score_name: score,
-                "position": board_payload(state, gid, ply),
-            }
-        )
+        payload = {
+            "rank": len(out) + 1,
+            "row": int(row_i),
+            "game_id": gid,
+            "ply": ply,
+            "is_terminal": bool(meta["is_terminal"]),
+            "position": board_payload(state, gid, ply),
+        }
+        if score_name == "l2":
+            flat_dim = int(state.config.get("flat_dim") or state.vectors_raw.shape[1])
+            payload["l2_sq"] = score
+            payload["rms"] = math.sqrt(score / flat_dim)
+        else:
+            payload[score_name] = score
+        out.append(payload)
         if len(out) >= req.top_k:
             break
     return out
