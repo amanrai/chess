@@ -246,7 +246,10 @@ function renderComparison(rows){
   const leftLast = rows[0]?.position?.last_move_san || null;
   const rightLast = rows[1]?.position?.last_move_san || null;
   const lastMatches = !!leftLast && !!rightLast && leftLast === rightLast;
-  const html = ['<table class="comparison-table"><thead><tr><th>row</th><th>game / ply</th><th>last</th><th>last match</th><th>eval</th><th>best</th><th>played next</th><th>rank</th><th>swing</th><th>pv</th></tr></thead><tbody>'];
+  const leftPrefix = JSON.stringify(rows[0]?.position?.uci || []);
+  const rightPrefix = JSON.stringify(rows[1]?.position?.uci || []);
+  const prefixMatches = rows.length >= 2 && leftPrefix === rightPrefix;
+  const html = ['<table class="comparison-table"><thead><tr><th>row</th><th>game / ply</th><th>last</th><th>last match</th><th>prefix match</th><th>eval</th><th>best</th><th>played next</th><th>rank</th><th>swing</th><th>pv</th></tr></thead><tbody>'];
   rows.forEach((r,i)=>{
     const sf = r.stockfish || {}; const best = sf.best || {}; const pos = r.position || {};
     const label = i===0 ? 'query' : 'selected';
@@ -254,7 +257,8 @@ function renderComparison(rows){
     const swing = sf.eval_swing_cp_vs_best === null || sf.eval_swing_cp_vs_best === undefined ? '—' : `${sf.eval_swing_cp_vs_best} cp`;
     const pv = best.pv_uci ? best.pv_uci.slice(0,5).join(' ') : '—';
     const matchText = rows.length >= 2 ? (lastMatches ? 'yes' : 'no') : '—';
-    html.push(`<tr><td>${label}</td><td>g${pos.game_id} / p${pos.ply}</td><td>${pos.last_move_san || '—'}</td><td>${matchText}</td><td>${evalText}</td><td>${best.move_san || '—'}</td><td>${pos.next_move_san || '—'}</td><td>${sf.played_move_rank || '—'}</td><td>${swing}</td><td>${pv}</td></tr>`);
+    const prefixText = rows.length >= 2 ? (prefixMatches ? 'yes' : 'no') : '—';
+    html.push(`<tr><td>${label}</td><td>g${pos.game_id} / p${pos.ply}</td><td>${pos.last_move_san || '—'}</td><td>${matchText}</td><td>${prefixText}</td><td>${evalText}</td><td>${best.move_san || '—'}</td><td>${pos.next_move_san || '—'}</td><td>${sf.played_move_rank || '—'}</td><td>${swing}</td><td>${pv}</td></tr>`);
   });
   html.push('</tbody></table>'); $('comparisonPanel').innerHTML = html.join('');
 }
