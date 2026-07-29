@@ -173,7 +173,9 @@ def read_eligible_games(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarra
             offsets.append(offsets[-1] + len(packets))
             pgn_texts.append(game_text)
             headers_list.append(headers)
+            iterator.set_postfix(accepted=len(pgn_texts), skipped_elo=skipped["elo"])
             if args.max_games and len(pgn_texts) >= args.max_games:
+                print(f"accepted game cap reached: {len(pgn_texts):,}/{args.max_games:,}")
                 break
         if args.max_games and len(pgn_texts) >= args.max_games:
             break
