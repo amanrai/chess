@@ -243,14 +243,18 @@ async function search(){
 }
 function renderComparison(rows){
   if(!rows || !rows.length){ $('comparisonPanel').textContent='No comparison.'; return; }
-  const html = ['<table class="comparison-table"><thead><tr><th>row</th><th>game / ply</th><th>eval</th><th>best</th><th>played next</th><th>rank</th><th>swing</th><th>pv</th></tr></thead><tbody>'];
+  const leftLast = rows[0]?.position?.last_move_san || null;
+  const rightLast = rows[1]?.position?.last_move_san || null;
+  const lastMatches = !!leftLast && !!rightLast && leftLast === rightLast;
+  const html = ['<table class="comparison-table"><thead><tr><th>row</th><th>game / ply</th><th>last</th><th>last match</th><th>eval</th><th>best</th><th>played next</th><th>rank</th><th>swing</th><th>pv</th></tr></thead><tbody>'];
   rows.forEach((r,i)=>{
     const sf = r.stockfish || {}; const best = sf.best || {}; const pos = r.position || {};
     const label = i===0 ? 'query' : 'selected';
     const evalText = sf.available ? (best.mate ? `M${best.mate}` : `${best.score_cp ?? '—'} cp`) : 'no engine';
     const swing = sf.eval_swing_cp_vs_best === null || sf.eval_swing_cp_vs_best === undefined ? '—' : `${sf.eval_swing_cp_vs_best} cp`;
     const pv = best.pv_uci ? best.pv_uci.slice(0,5).join(' ') : '—';
-    html.push(`<tr><td>${label}</td><td>g${pos.game_id} / p${pos.ply}</td><td>${evalText}</td><td>${best.move_san || '—'}</td><td>${pos.next_move_san || '—'}</td><td>${sf.played_move_rank || '—'}</td><td>${swing}</td><td>${pv}</td></tr>`);
+    const matchText = rows.length >= 2 ? (lastMatches ? 'yes' : 'no') : '—';
+    html.push(`<tr><td>${label}</td><td>g${pos.game_id} / p${pos.ply}</td><td>${pos.last_move_san || '—'}</td><td>${matchText}</td><td>${evalText}</td><td>${best.move_san || '—'}</td><td>${pos.next_move_san || '—'}</td><td>${sf.played_move_rank || '—'}</td><td>${swing}</td><td>${pv}</td></tr>`);
   });
   html.push('</tbody></table>'); $('comparisonPanel').innerHTML = html.join('');
 }
@@ -278,7 +282,7 @@ async function init(){
 }
 $('sampleBtn').onclick=()=>sample().catch(e=>setStatus(e.message));
 $('searchBtn').onclick=()=>search().catch(e=>setStatus(e.message));
-$('analyzeBtn').onclick=()=>{ analyzeSide('left').catch(e=>$('leftAnalysis').textContent=e.message); analyzeSide('right').catch(e=>$('rightAnalysis').textContent=e.message); };
+$('analyzeBtn').onclick=()=>{ analyzeSide('left').catch(e=>$('leftAnalysis').textContent=e.message); analyzeSide('right').catch(e=>$('rightAnalysis').textContent=e.message); compareSelected().catch(e=>setStatus('Comparison failed: '+e.message)); };
 $('bothPrev').onclick=()=>moveBoth(-1).catch(e=>setStatus(e.message));
 $('bothNext').onclick=()=>moveBoth(1).catch(e=>setStatus(e.message));
 $('leftLoad').onclick=()=>state.left && loadPosition('left', state.left.game_id, parseInt($('leftPly').value,10)).catch(e=>setStatus(e.message));
