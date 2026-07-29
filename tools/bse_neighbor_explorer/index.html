@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BSE neighbor explorer</title>
+  <style>
+    :root {
+      --bg: #282C34;
+      --surface: #2F343D;
+      --sunken: #21252B;
+      --border: rgba(255, 255, 255, 0.06);
+      --text: #ABB2BF;
+      --text-hi: #C8CDD4;
+      --muted: #7F8794;
+      --faint: #5C6370;
+      --accent: #E5C07B;
+      --accent-deep: #D19A66;
+      --focus: rgba(229, 192, 123, 0.45);
+      --btn-blue: #9DB8D6;
+      --btn-green: #A6C796;
+      --btn-orange: #E0B080;
+      --text-on-btn: #21252B;
+      --radius: 2px;
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      background: var(--bg);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: var(--bg); }
+    button, select, input { font: inherit; }
+    .app { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+    .sidebar { background: var(--sunken); border-right: 1px solid var(--border); padding: 16px 14px; }
+    .brand { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+    .brand h1 { font-size: 15px; line-height: 1.2; margin: 0; color: var(--text-hi); letter-spacing: -0.01em; }
+    .toggle { border: 1px solid var(--border); background: transparent; color: var(--muted); width: 28px; height: 28px; border-radius: var(--radius); }
+    .nav-item { display: flex; align-items: center; gap: 8px; padding: 8px 9px; border-radius: var(--radius); color: var(--muted); margin: 2px 0; }
+    .nav-item.active { color: var(--text-hi); background: var(--surface); border-left: 2px solid var(--accent); }
+    .main { padding: 18px; min-width: 0; }
+    .topbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 14px; }
+    .title h2 { margin: 0 0 4px; color: var(--text-hi); font-size: 20px; letter-spacing: -0.02em; font-weight: 600; }
+    .title p { margin: 0; color: var(--muted); font-size: 13px; }
+    .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; }
+    .control { display: flex; align-items: center; gap: 6px; background: var(--surface); border: 1px solid var(--border); padding: 7px 8px; border-radius: var(--radius); min-height: 34px; }
+    .control label { color: var(--muted); font-size: 12px; }
+    select, input[type="number"] { background: var(--sunken); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); height: 28px; padding: 0 8px; outline: none; }
+    input[type="checkbox"] { accent-color: var(--accent); }
+    select:focus, input:focus, button:focus { outline: 2px solid var(--focus); outline-offset: 1px; }
+    .btn { border: 0; border-radius: var(--radius); height: 34px; padding: 0 11px; color: var(--text-on-btn); background: var(--btn-blue); font-weight: 500; cursor: pointer; }
+    .btn.green { background: var(--btn-green); }
+    .btn.orange { background: var(--btn-orange); }
+    .btn.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+    .btn:disabled { opacity: .45; cursor: not-allowed; }
+    .boards { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }
+    .panel-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+    .panel-head h3 { margin: 0; color: var(--text-hi); font-size: 14px; font-weight: 600; }
+    .panel-head .meta { color: var(--muted); font-size: 12px; }
+    .panel-body { padding: 12px; }
+    .board-row { display: grid; grid-template-columns: minmax(280px, 420px) 1fr; gap: 12px; align-items: start; }
+    .board { width: min(100%, 420px); aspect-ratio: 1; display: grid; grid-template-columns: repeat(8, 1fr); border: 1px solid var(--border); background: var(--sunken); }
+    .sq { display: flex; align-items: center; justify-content: center; font-size: clamp(18px, 3.4vw, 36px); line-height: 1; user-select: none; }
+    .light { background: #3A404B; }
+    .dark { background: #262B33; }
+    .coord { position: relative; }
+    .coord::after { content: attr(data-c); position: absolute; right: 3px; bottom: 2px; color: rgba(171,178,191,.35); font-size: 10px; }
+    .details { background: var(--sunken); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; min-height: 100%; }
+    .kv { display: grid; grid-template-columns: 94px 1fr; gap: 5px 8px; font-size: 12px; }
+    .kv .k { color: var(--muted); }
+    .kv .v { color: var(--text); overflow-wrap: anywhere; }
+    .scrub { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+    .scrub input { width: 92px; }
+    .neighbors { margin-top: 14px; padding: 10px 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .pill { border: 1px solid var(--border); background: var(--sunken); color: var(--muted); border-radius: var(--radius); padding: 6px 8px; font-size: 12px; cursor: pointer; }
+    .pill.active { color: var(--text-hi); border-color: rgba(229,192,123,.45); box-shadow: inset 0 -1px 0 var(--accent); }
+    .analysis { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
+    pre { margin: 0; white-space: pre-wrap; color: var(--text); font-size: 12px; line-height: 1.45; background: var(--sunken); border: 1px solid var(--border); padding: 10px; border-radius: var(--radius); max-height: 260px; overflow: auto; }
+    .status { color: var(--muted); font-size: 12px; min-height: 18px; margin-top: 10px; }
+    @media (max-width: 1120px) {
+      .app { grid-template-columns: 1fr; }
+      .sidebar { display: none; }
+      .boards, .analysis { grid-template-columns: 1fr; }
+      .board-row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand"><h1>BSE neighbor explorer</h1><button class="toggle" aria-label="Toggle sidebar">▥</button></div>
+      <div class="nav-item active">◧ Latent neighbors</div>
+      <div class="nav-item">▦ Analysis</div>
+      <div class="nav-item">⚙ Settings</div>
+    </aside>
+    <main class="main">
+      <div class="topbar">
+        <div class="title">
+          <h2>Planning manifold day-one inspection</h2>
+          <p>Sample a BSE state on the left, search flattened latent neighbors, then evolve both games independently.</p>
+        </div>
+        <div class="controls">
+          <div class="control"><label>sample</label><select id="sampleMode"><option value="random">pure random</option><option value="bucket">bucket</option></select></div>
+          <div class="control"><label>bucket</label><select id="bucketSelect"></select></div>
+          <div class="control"><label>distance</label><select id="distance"><option value="cosine">cosine</option><option value="l2">raw L2</option></select></div>
+          <div class="control"><label><input id="excludeSame" type="checkbox" checked /> exclude same game</label></div>
+          <button class="btn green" id="sampleBtn">Sample move</button>
+          <button class="btn" id="searchBtn">Search</button>
+          <button class="btn ghost" id="analyzeBtn">Analyze</button>
+        </div>
+      </div>
+
+      <section class="boards">
+        <div class="panel">
+          <div class="panel-head"><h3>Query game</h3><div class="meta" id="leftMeta">none</div></div>
+          <div class="panel-body">
+            <div class="board-row"><div class="board" id="leftBoard"></div><div class="details"><div class="kv" id="leftDetails"></div><div class="scrub"><button class="btn ghost" id="leftPrev">←</button><input id="leftPly" type="number" min="1" /><button class="btn ghost" id="leftNext">→</button><button class="btn orange" id="leftLoad">Load ply</button></div></div></div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>Neighbor game</h3><div class="meta" id="rightMeta">none</div></div>
+          <div class="panel-body">
+            <div class="board-row"><div class="board" id="rightBoard"></div><div class="details"><div class="kv" id="rightDetails"></div><div class="scrub"><button class="btn ghost" id="rightPrev">←</button><input id="rightPly" type="number" min="1" /><button class="btn ghost" id="rightNext">→</button><button class="btn orange" id="rightLoad">Load ply</button></div></div></div>
+          </div>
+        </div>
+      </section>
+
+      <div class="panel neighbors">
+        <span class="meta">Top 5 distinct games</span>
+        <div id="neighborPills"></div>
+      </div>
+
+      <section class="analysis">
+        <div class="panel"><div class="panel-head"><h3>Left analysis</h3><div class="meta">python-chess + Stockfish if configured</div></div><div class="panel-body"><pre id="leftAnalysis">No analysis yet.</pre></div></div>
+        <div class="panel"><div class="panel-head"><h3>Right analysis</h3><div class="meta">selected neighbor</div></div><div class="panel-body"><pre id="rightAnalysis">No analysis yet.</pre></div></div>
+      </section>
+      <div class="status" id="status"></div>
+    </main>
+  </div>
+
+<script>
+const piece = { p:'♟', n:'♞', b:'♝', r:'♜', q:'♛', k:'♚', P:'♙', N:'♘', B:'♗', R:'♖', Q:'♕', K:'♔' };
+const state = { config:null, left:null, right:null, neighbors:[], neighborIndex:0 };
+const $ = id => document.getElementById(id);
+function setStatus(s){ $('status').textContent = s || ''; }
+async function api(path, opts={}){
+  const res = await fetch(path, { headers:{'Content-Type':'application/json'}, ...opts });
+  if(!res.ok) throw new Error(await res.text());
+  return await res.json();
+}
+function renderBoard(el, boardFen){
+  el.innerHTML = '';
+  const ranks = boardFen ? boardFen.split('/') : ['8','8','8','8','8','8','8','8'];
+  for(let r=0; r<8; r++){
+    let file = 0;
+    for(const ch of ranks[r]){
+      const n = parseInt(ch,10);
+      if(!Number.isNaN(n)) { for(let i=0;i<n;i++) addSq(r,file++,''); }
+      else addSq(r,file++, piece[ch] || ch);
+    }
+  }
+  function addSq(r,f,txt){
+    const d = document.createElement('div');
+    const rank = 8-r, fileLetter = 'abcdefgh'[f];
+    d.className = 'sq ' + (((r+f)%2===0) ? 'light' : 'dark') + ' coord';
+    d.dataset.c = (f===0 || r===7) ? `${fileLetter}${rank}` : '';
+    d.textContent = txt;
+    el.appendChild(d);
+  }
+}
+function detailHtml(pos){
+  if(!pos) return '';
+  const h = pos.headers || {};
+  const fields = [
+    ['game', pos.game_id], ['ply', `${pos.ply} / ${pos.terminal_ply}`], ['turn', pos.turn],
+    ['event', h.Event || ''], ['white', `${h.White || ''} ${h.WhiteElo || ''}`], ['black', `${h.Black || ''} ${h.BlackElo || ''}`],
+    ['last', pos.last_move_san || '—'], ['next', pos.next_move_san || '—'], ['check', pos.is_check ? 'yes' : 'no'],
+    ['legal', pos.legal_move_count], ['fen', pos.fen]
+  ];
+  return fields.map(([k,v]) => `<div class="k">${k}</div><div class="v">${String(v)}</div>`).join('');
+}
+function renderSide(side, pos){
+  state[side] = pos;
+  renderBoard($(side==='left'?'leftBoard':'rightBoard'), pos?.board_fen);
+  $(`${side}Details`).innerHTML = detailHtml(pos);
+  $(`${side}Meta`).textContent = pos ? `game ${pos.game_id}, ply ${pos.ply}` : 'none';
+  $(`${side}Ply`).value = pos ? pos.ply : '';
+}
+async function loadPosition(side, game_id, ply){
+  const pos = await api(`/api/position?game_id=${game_id}&ply=${ply}`);
+  renderSide(side, pos);
+}
+async function moveSide(side, delta){
+  const pos = state[side]; if(!pos) return;
+  const ply = Math.max(1, Math.min(pos.terminal_ply, pos.ply + delta));
+  await loadPosition(side, pos.game_id, ply);
+}
+function renderNeighborPills(){
+  const el = $('neighborPills'); el.innerHTML='';
+  state.neighbors.forEach((n,i)=>{
+    const b=document.createElement('button'); b.className='pill'+(i===state.neighborIndex?' active':'');
+    const score = n.cosine !== undefined ? `cos ${n.cosine.toFixed(4)}` : `l2 ${n.l2.toFixed(2)}`;
+    b.textContent = `#${i+1} g${n.game_id} p${n.ply} · ${score}`;
+    b.onclick=()=>{ state.neighborIndex=i; renderSide('right', n.position); renderNeighborPills(); };
+    el.appendChild(b);
+  });
+}
+async function sample(){
+  setStatus('Sampling indexed query position…');
+  const mode = $('sampleMode').value;
+  const body = {mode};
+  if(mode==='bucket') body.bucket = parseInt($('bucketSelect').value,10);
+  const data = await api('/api/sample', {method:'POST', body:JSON.stringify(body)});
+  renderSide('left', data.position);
+  state.neighbors=[]; renderNeighborPills(); renderSide('right', null);
+  setStatus('Sample loaded. Search when ready.');
+}
+async function search(){
+  if(!state.left) return;
+  setStatus('Searching flattened BSE index…');
+  const body = {game_id:state.left.game_id, ply:state.left.ply, distance:$('distance').value, top_k:5, exclude_same_game:$('excludeSame').checked, distinct_games:true};
+  const data = await api('/api/search', {method:'POST', body:JSON.stringify(body)});
+  state.neighbors = data.results; state.neighborIndex=0;
+  if(state.neighbors.length) renderSide('right', state.neighbors[0].position);
+  renderNeighborPills(); setStatus(`Loaded ${state.neighbors.length} neighbors.`);
+}
+async function analyzeSide(side){
+  const pos = state[side]; if(!pos) return;
+  const el = $(side==='left'?'leftAnalysis':'rightAnalysis');
+  el.textContent='Analyzing…';
+  const data = await api('/api/analyze', {method:'POST', body:JSON.stringify({game_id:pos.game_id, ply:pos.ply})});
+  el.textContent = JSON.stringify(data, null, 2);
+}
+async function init(){
+  state.config = await api('/api/config');
+  const bs = $('bucketSelect'); bs.innerHTML='';
+  for(let i=0; i<=state.config.max_bucket; i++){
+    const opt=document.createElement('option'); opt.value=i; const lo=i*state.config.bucket_plies+1, hi=(i+1)*state.config.bucket_plies; opt.textContent=`${lo}-${hi}`; bs.appendChild(opt);
+  }
+  setStatus(`Loaded ${state.config.num_positions} vectors from ${state.config.num_games} games. Stockfish: ${state.config.stockfish_configured ? 'configured' : 'not configured'}.`);
+}
+$('sampleBtn').onclick=()=>sample().catch(e=>setStatus(e.message));
+$('searchBtn').onclick=()=>search().catch(e=>setStatus(e.message));
+$('analyzeBtn').onclick=()=>{ analyzeSide('left').catch(e=>$('leftAnalysis').textContent=e.message); analyzeSide('right').catch(e=>$('rightAnalysis').textContent=e.message); };
+$('leftPrev').onclick=()=>moveSide('left',-1).catch(e=>setStatus(e.message)); $('leftNext').onclick=()=>moveSide('left',1).catch(e=>setStatus(e.message));
+$('rightPrev').onclick=()=>moveSide('right',-1).catch(e=>setStatus(e.message)); $('rightNext').onclick=()=>moveSide('right',1).catch(e=>setStatus(e.message));
+$('leftLoad').onclick=()=>state.left && loadPosition('left', state.left.game_id, parseInt($('leftPly').value,10)).catch(e=>setStatus(e.message));
+$('rightLoad').onclick=()=>state.right && loadPosition('right', state.right.game_id, parseInt($('rightPly').value,10)).catch(e=>setStatus(e.message));
+init().catch(e=>setStatus(e.message));
+</script>
+</body>
+</html>

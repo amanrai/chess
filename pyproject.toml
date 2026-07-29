@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
   "beautifulsoup4>=4.12",
   "cryptography>=42",
+  "fastapi>=0.111",
   "ipykernel>=6.29",
   "jupyter>=1.0",
   "matplotlib>=3.9",
@@ -16,6 +17,7 @@ dependencies = [
   "requests>=2.32",
   "torch>=2.4",
   "tqdm>=4.66",
+  "uvicorn>=0.30",
   "wandb>=0.17",
 ]
 

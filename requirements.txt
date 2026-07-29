@@ -1,10 +1,12 @@
 beautifulsoup4>=4.12
 cryptography>=42
+fastapi>=0.111
 numpy>=2.0
 pandas>=2.2
 python-chess>=1.999
 requests>=2.32
 tqdm>=4.66
+uvicorn>=0.30
 wandb>=0.17
 
 # Optional/dev convenience. Not required for Vast data prep/training.
