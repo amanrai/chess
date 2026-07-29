@@ -292,7 +292,7 @@ def main() -> int:
     parser.add_argument("--terminal-samples", type=int, default=10_000)
     parser.add_argument("--bucket-plies", type=int, default=5)
     parser.add_argument("--seq-len", type=int, default=8)
-    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--seed", type=int, default=20260728)
     parser.add_argument("--max-games", type=int, default=0, help="Debug cap on eligible games; 0 keeps all")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
