@@ -74,6 +74,11 @@
     .pill { border: 1px solid var(--border); background: var(--sunken); color: var(--muted); border-radius: var(--radius); padding: 6px 8px; font-size: 12px; cursor: pointer; }
     .pill.active { color: var(--text-hi); border-color: rgba(229,192,123,.45); box-shadow: inset 0 -1px 0 var(--accent); }
     .analysis { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
+    .analysis-wide { grid-column: 1 / -1; }
+    .comparison-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .comparison-table th, .comparison-table td { border-bottom: 1px solid var(--border); padding: 7px 8px; text-align: left; vertical-align: top; }
+    .comparison-table th { color: var(--muted); font-weight: 500; }
+    .comparison-table td { color: var(--text); }
     pre { margin: 0; white-space: pre-wrap; color: var(--text); font-size: 12px; line-height: 1.45; background: var(--sunken); border: 1px solid var(--border); padding: 10px; border-radius: var(--radius); max-height: 260px; overflow: auto; }
     .status { color: var(--muted); font-size: 12px; min-height: 18px; margin-top: 10px; }
     @media (max-width: 1120px) {
@@ -130,6 +135,7 @@
       </div>
 
       <section class="analysis">
+        <div class="panel analysis-wide"><div class="panel-head"><h3>Post-search Stockfish comparison</h3><div class="meta">query + top 5 neighbors</div></div><div class="panel-body" id="comparisonPanel">No comparison yet.</div></div>
         <div class="panel"><div class="panel-head"><h3>Left analysis</h3><div class="meta">python-chess + Stockfish if configured</div></div><div class="panel-body"><pre id="leftAnalysis">No analysis yet.</pre></div></div>
         <div class="panel"><div class="panel-head"><h3>Right analysis</h3><div class="meta">selected neighbor</div></div><div class="panel-body"><pre id="rightAnalysis">No analysis yet.</pre></div></div>
       </section>
@@ -221,13 +227,34 @@ async function search(){
   const data = await api('/api/search', {method:'POST', body:JSON.stringify(body)});
   state.neighbors = data.results; state.neighborIndex=0;
   if(state.neighbors.length) renderSide('right', state.neighbors[0].position);
-  renderNeighborPills(); setStatus(`Loaded ${state.neighbors.length} neighbors.`);
+  renderNeighborPills(); setStatus(`Loaded ${state.neighbors.length} neighbors. Running Stockfish comparison…`);
+  compareSearchResults().catch(e=>setStatus('Search loaded; comparison failed: '+e.message));
+}
+function renderComparison(rows){
+  if(!rows || !rows.length){ $('comparisonPanel').textContent='No comparison.'; return; }
+  const html = ['<table class="comparison-table"><thead><tr><th>row</th><th>game / ply</th><th>eval</th><th>best</th><th>played next</th><th>rank</th><th>swing</th><th>pv</th></tr></thead><tbody>'];
+  rows.forEach((r,i)=>{
+    const sf = r.stockfish || {}; const best = sf.best || {}; const pos = r.position || {};
+    const label = i===0 ? 'query' : `#${i}`;
+    const evalText = sf.available ? (best.mate ? `M${best.mate}` : `${best.score_cp ?? '—'} cp`) : 'no engine';
+    const swing = sf.eval_swing_cp_vs_best === null || sf.eval_swing_cp_vs_best === undefined ? '—' : `${sf.eval_swing_cp_vs_best} cp`;
+    const pv = best.pv_uci ? best.pv_uci.slice(0,5).join(' ') : '—';
+    html.push(`<tr><td>${label}</td><td>g${pos.game_id} / p${pos.ply}</td><td>${evalText}</td><td>${best.move_san || '—'}</td><td>${pos.next_move_san || '—'}</td><td>${sf.played_move_rank || '—'}</td><td>${swing}</td><td>${pv}</td></tr>`);
+  });
+  html.push('</tbody></table>'); $('comparisonPanel').innerHTML = html.join('');
+}
+async function compareSearchResults(){
+  if(!state.left || !state.neighbors.length) return;
+  const positions = [{game_id:state.left.game_id, ply:state.left.ply}, ...state.neighbors.map(n=>({game_id:n.game_id, ply:n.ply}))];
+  $('comparisonPanel').textContent = 'Running Stockfish on query + top 5…';
+  const data = await api('/api/analyze_many', {method:'POST', body:JSON.stringify({positions, depth:10, movetime_ms:150, multipv:5, eval_played_move:true})});
+  renderComparison(data.analyses); setStatus(`Loaded ${state.neighbors.length} neighbors and Stockfish comparison.`);
 }
 async function analyzeSide(side){
   const pos = state[side]; if(!pos) return;
   const el = $(side==='left'?'leftAnalysis':'rightAnalysis');
   el.textContent='Analyzing…';
-  const data = await api('/api/analyze', {method:'POST', body:JSON.stringify({game_id:pos.game_id, ply:pos.ply})});
+  const data = await api('/api/analyze', {method:'POST', body:JSON.stringify({game_id:pos.game_id, ply:pos.ply, multipv:5, eval_played_move:true})});
   el.textContent = JSON.stringify(data, null, 2);
 }
 async function init(){

@@ -65,6 +65,16 @@ class AnalyzeRequest(BaseModel):
     ply: int
     depth: int = 12
     movetime_ms: int = 250
+    multipv: int = 5
+    eval_played_move: bool = True
+
+
+class AnalyzeManyRequest(BaseModel):
+    positions: list[dict[str, int]]
+    depth: int = 10
+    movetime_ms: int = 150
+    multipv: int = 5
+    eval_played_move: bool = True
 
 
 @dataclass
@@ -251,19 +261,23 @@ def board_payload(state: ExplorerState, game_id: int, ply: int) -> dict[str, Any
     }
 
 
-def next_move_san(state: ExplorerState, game_id: int, ply: int) -> str | None:
+def next_move(state: ExplorerState, game_id: int, ply: int) -> tuple[str | None, str | None]:
     length = int(state.offsets[game_id + 1] - state.offsets[game_id])
     if ply >= length:
-        return None
+        return None, None
     game = chess.pgn.read_game(io.StringIO(state.pgns[game_id]))
     if game is None:
-        return None
+        return None, None
     board = game.board()
     for i, move in enumerate(game.mainline_moves(), start=1):
         if i == ply + 1:
-            return board.san(move)
+            return board.san(move), move.uci()
         board.push(move)
-    return None
+    return None, None
+
+
+def next_move_san(state: ExplorerState, game_id: int, ply: int) -> str | None:
+    return next_move(state, game_id, ply)[0]
 
 
 def brute_force_search(state: ExplorerState, req: SearchRequest) -> list[dict[str, Any]]:
@@ -347,21 +361,74 @@ def material_summary(board: chess.Board) -> dict[str, Any]:
     }
 
 
-def stockfish_eval(state: ExplorerState, board: chess.Board, depth: int, movetime_ms: int) -> dict[str, Any]:
+def stockfish_eval(
+    state: ExplorerState,
+    board: chess.Board,
+    depth: int,
+    movetime_ms: int,
+    *,
+    multipv: int = 5,
+    played_next_uci: str | None = None,
+    eval_played_move: bool = True,
+) -> dict[str, Any]:
     if state.stockfish_path is None or not state.stockfish_path.exists():
         return {"available": False, "reason": "stockfish path not configured or missing"}
     try:
         with chess.engine.SimpleEngine.popen_uci(str(state.stockfish_path)) as engine:
             limit = chess.engine.Limit(depth=max(1, depth), time=max(1, movetime_ms) / 1000.0)
-            info = engine.analyse(board, limit)
-            score = info["score"].white()
-            pv = info.get("pv", [])
+            raw = engine.analyse(board, limit, multipv=max(1, min(int(multipv), 10)))
+            infos = raw if isinstance(raw, list) else [raw]
+            top_moves = []
+            for info in infos:
+                score = info["score"].white()
+                pv = info.get("pv", [])
+                first = pv[0] if pv else None
+                top_moves.append(
+                    {
+                        "rank": int(info.get("multipv", len(top_moves) + 1)),
+                        "move_uci": first.uci() if first else None,
+                        "move_san": board.san(first) if first else None,
+                        "score_cp": score.score(mate_score=100000),
+                        "mate": score.mate(),
+                        "depth": info.get("depth"),
+                        "pv_uci": [m.uci() for m in pv],
+                    }
+                )
+            top_moves.sort(key=lambda x: x["rank"])
+            played_rank = None
+            for row in top_moves:
+                if played_next_uci and row["move_uci"] == played_next_uci:
+                    played_rank = row["rank"]
+                    break
+
+            played_after = None
+            eval_swing_cp = None
+            if eval_played_move and played_next_uci:
+                try:
+                    move = chess.Move.from_uci(played_next_uci)
+                    if move in board.legal_moves:
+                        next_board = board.copy(stack=False)
+                        next_board.push(move)
+                        next_info = engine.analyse(next_board, limit)
+                        next_score = next_info["score"].white()
+                        played_after = {
+                            "score_cp": next_score.score(mate_score=100000),
+                            "mate": next_score.mate(),
+                            "depth": next_info.get("depth"),
+                        }
+                        if top_moves and top_moves[0]["score_cp"] is not None and played_after["score_cp"] is not None:
+                            eval_swing_cp = int(played_after["score_cp"] - top_moves[0]["score_cp"])
+                except Exception as exc:
+                    played_after = {"error": str(exc)}
+
             return {
                 "available": True,
-                "score_cp": score.score(mate_score=100000),
-                "mate": score.mate(),
-                "depth": info.get("depth"),
-                "pv_uci": [m.uci() for m in pv],
+                "best": top_moves[0] if top_moves else None,
+                "top_moves": top_moves,
+                "played_next_uci": played_next_uci,
+                "played_move_rank": played_rank,
+                "played_after": played_after,
+                "eval_swing_cp_vs_best": eval_swing_cp,
             }
     except Exception as exc:  # pragma: no cover - external engine
         return {"available": False, "reason": str(exc)}
@@ -429,8 +496,7 @@ def create_app(state: ExplorerState, static_dir: Path) -> FastAPI:
         req.top_k = min(max(req.top_k, 1), 20)
         return {"query": board_payload(state, req.game_id, req.ply), "results": brute_force_search(state, req)}
 
-    @app.post("/api/analyze")
-    def api_analyze(req: AnalyzeRequest) -> dict[str, Any]:
+    def analyze_position(req: AnalyzeRequest) -> dict[str, Any]:
         board, san, uci = game_at_ply(state, req.game_id, req.ply)
         captures = [board.san(m) for m in board.legal_moves if board.is_capture(m)]
         checks = []
@@ -439,14 +505,45 @@ def create_app(state: ExplorerState, static_dir: Path) -> FastAPI:
             b.push(move)
             if b.is_check():
                 checks.append(board.san(move))
+        _, next_uci = next_move(state, req.game_id, req.ply)
         return {
             "position": board_payload(state, req.game_id, req.ply),
             "material": material_summary(board),
             "legal_moves": [board.san(m) for m in board.legal_moves],
             "captures": captures,
             "checks": checks,
-            "stockfish": stockfish_eval(state, board, req.depth, req.movetime_ms),
+            "stockfish": stockfish_eval(
+                state,
+                board,
+                req.depth,
+                req.movetime_ms,
+                multipv=req.multipv,
+                played_next_uci=next_uci,
+                eval_played_move=req.eval_played_move,
+            ),
         }
+
+    @app.post("/api/analyze")
+    def api_analyze(req: AnalyzeRequest) -> dict[str, Any]:
+        return analyze_position(req)
+
+    @app.post("/api/analyze_many")
+    def api_analyze_many(req: AnalyzeManyRequest) -> dict[str, Any]:
+        rows = []
+        for pos in req.positions[:20]:
+            rows.append(
+                analyze_position(
+                    AnalyzeRequest(
+                        game_id=int(pos["game_id"]),
+                        ply=int(pos["ply"]),
+                        depth=req.depth,
+                        movetime_ms=req.movetime_ms,
+                        multipv=req.multipv,
+                        eval_played_move=req.eval_played_move,
+                    )
+                )
+            )
+        return {"analyses": rows}
 
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=static_dir), name="static")
