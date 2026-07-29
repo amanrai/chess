@@ -9,40 +9,36 @@ set -euo pipefail
 # Or set:
 #   BSE_NEIGHBOR_PGNS="path/a.pgn path/b.pgn" ./build_bse_neighbor_index.sh
 #
-# If no PGNs are provided, this script uses the held-out 2000-2199 eval PGN
-# when present, which is the currently available 1800-2200-ish source on the
-# target box. If that is missing, it tries to auto-discover files under
-# data/processed/lumbras with names containing 1800 and 2200.
+# If no PGNs are provided, this script creates the 1800-2200 Lumbras split
+# from the raw .7z archives when needed, then uses that split.
+
+DEFAULT_PGN="data/processed/lumbras/lumbras_otb_both_1800_to_2200_base.pgn"
+RAW_DIR="${LUMBRAS_RAW_DIR:-data/raw/lumbras/otb}"
+OUT_DIR="${LUMBRAS_PROCESSED_DIR:-data/processed/lumbras}"
 
 if [[ "$#" -gt 0 ]]; then
   PGNS=("$@")
 elif [[ -n "${BSE_NEIGHBOR_PGNS:-}" ]]; then
   # shellcheck disable=SC2206
   PGNS=(${BSE_NEIGHBOR_PGNS})
-elif [[ -f data/processed/lumbras/eval_board_state_2000_2199/games.pgn ]]; then
-  PGNS=(data/processed/lumbras/eval_board_state_2000_2199/games.pgn)
 else
-  mapfile -t PGNS < <(find data/processed/lumbras -type f -name '*.pgn' \
-    | grep -Ei '1800.*2200|2200.*1800|2000.*2199|2199.*2000' \
-    | sort)
+  if [[ ! -f "$DEFAULT_PGN" ]]; then
+    echo "Creating 1800-2200 Lumbras split at $DEFAULT_PGN"
+    uv run python scripts/extract_lumbras_2200_splits.py \
+      --raw-dir "$RAW_DIR" \
+      --out-dir "$OUT_DIR" \
+      --min-elo 1800 \
+      --ft-elo 2201
+  fi
+  PGNS=("$DEFAULT_PGN")
 fi
 
-if [[ "${#PGNS[@]}" -eq 0 ]]; then
-  cat >&2 <<'EOF'
-No suitable 1800-2200 / 2000-2199 PGN files were provided or auto-discovered.
-
-Run with explicit PGNs, for example:
-
-  ./build_bse_neighbor_index.sh \
-    data/processed/lumbras/eval_board_state_2000_2199/games.pgn
-
-Or:
-
-  BSE_NEIGHBOR_PGNS="data/processed/lumbras/file1.pgn data/processed/lumbras/file2.pgn" \
-    ./build_bse_neighbor_index.sh
-EOF
-  exit 2
-fi
+for pgn in "${PGNS[@]}"; do
+  if [[ ! -f "$pgn" ]]; then
+    echo "PGN not found: $pgn" >&2
+    exit 2
+  fi
+done
 
 printf 'Using PGNs:\n'
 printf '  %s\n' "${PGNS[@]}"
