@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lumbras Metadata Store</title>
+  <style>
+    :root {
+      --bg: #f5f5f4;
+      --surface: #fafaf9;
+      --line: #d6d3d1;
+      --text: #1c1917;
+      --muted: #78716c;
+      --accent: #0f766e;
+      --accent-dark: #115e59;
+      --danger: #b91c1c;
+      --code: #292524;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+      font-size: 14px;
+      line-height: 1.4;
+    }
+    .app { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+    aside { border-right: 1px solid var(--line); background: #eeece8; padding: 20px 16px; }
+    main { padding: 22px 24px; min-width: 0; }
+    h1 { margin: 0 0 18px; font-size: 18px; font-weight: 650; }
+    h2 { margin: 0 0 10px; font-size: 15px; font-weight: 650; }
+    .nav { display: grid; gap: 8px; margin-top: 18px; }
+    button, select, input, textarea {
+      font: inherit;
+    }
+    button {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 8px 10px;
+      cursor: pointer;
+      text-align: left;
+    }
+    button:hover { border-color: #a8a29e; background: #fff; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: white; text-align: center; }
+    button.primary:hover { background: var(--accent-dark); }
+    .muted { color: var(--muted); }
+    .section { border: 1px solid var(--line); background: var(--surface); border-radius: 10px; margin-bottom: 16px; }
+    .section-header { padding: 12px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .section-body { padding: 14px; }
+    .grid { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 10px; }
+    .metric { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: #fff; }
+    .metric strong { display: block; font-size: 18px; margin-bottom: 2px; }
+    textarea {
+      width: 100%;
+      min-height: 150px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: #fff;
+      color: var(--code);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+    }
+    .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .toolbar input { width: 90px; border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: #fff; }
+    .table-wrap { overflow: auto; border-top: 1px solid var(--line); }
+    table { width: 100%; border-collapse: collapse; min-width: 760px; }
+    th, td { border-bottom: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; white-space: nowrap; }
+    th { background: #eeece8; position: sticky; top: 0; font-weight: 650; }
+    tr:hover td { background: #fff; }
+    .error { color: var(--danger); white-space: pre-wrap; }
+    pre { margin: 0; white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+    dialog { width: min(980px, calc(100vw - 48px)); border: 1px solid var(--line); border-radius: 10px; padding: 0; }
+    dialog::backdrop { background: rgba(28, 25, 23, 0.35); }
+    .dialog-body { max-height: 70vh; overflow: auto; padding: 14px; background: var(--surface); }
+    @media (max-width: 900px) {
+      .app { grid-template-columns: 1fr; }
+      aside { border-right: 0; border-bottom: 1px solid var(--line); }
+      .grid { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside>
+      <h1>Lumbras Metadata Store</h1>
+      <div id="dbPath" class="muted">Loading…</div>
+      <div class="nav">
+        <button data-preset="bse-1600-1800">BSE 1600–1800</button>
+        <button data-preset="dev-1800-2200">Dev 1800–2200</button>
+        <button data-preset="planning-2200-plus">Planning 2200+</button>
+        <button data-preset="archives">Archive counts</button>
+        <button data-preset="headers">Header keys</button>
+      </div>
+    </aside>
+
+    <main>
+      <section class="section">
+        <div class="section-header"><h2>Summary</h2><button id="refreshSummary">Refresh</button></div>
+        <div class="section-body"><div id="summary" class="grid"></div></div>
+      </section>
+
+      <section class="section">
+        <div class="section-header">
+          <h2>SQL</h2>
+          <div class="toolbar">
+            <label class="muted">Limit <input id="limit" type="number" min="1" max="5000" value="200" /></label>
+            <button id="run" class="primary">Run query</button>
+          </div>
+        </div>
+        <div class="section-body">
+          <textarea id="sql">select game_id, white, black, result, white_elo, black_elo, date, source_archive
+from games
+where min_elo >= 1800 and max_elo <= 2200
+order by game_id</textarea>
+        </div>
+        <div id="error" class="section-body error" hidden></div>
+        <div class="section-header"><span id="rowCount" class="muted">No results yet</span></div>
+        <div class="table-wrap"><table id="results"></table></div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="pgnDialog">
+    <div class="section-header"><h2 id="pgnTitle">PGN</h2><button id="closeDialog">Close</button></div>
+    <div class="dialog-body"><pre id="pgnText"></pre></div>
+  </dialog>
+
+  <script>
+    const dbPath = document.getElementById('dbPath');
+    const summary = document.getElementById('summary');
+    const sql = document.getElementById('sql');
+    const limit = document.getElementById('limit');
+    const error = document.getElementById('error');
+    const rowCount = document.getElementById('rowCount');
+    const results = document.getElementById('results');
+    const dialog = document.getElementById('pgnDialog');
+    const pgnText = document.getElementById('pgnText');
+    const pgnTitle = document.getElementById('pgnTitle');
+
+    function fmt(n) { return Number(n || 0).toLocaleString(); }
+
+    async function api(path, options) {
+      const res = await fetch(path, options);
+      if (!res.ok) {
+        let msg = await res.text();
+        try { msg = JSON.parse(msg).detail || msg; } catch {}
+        throw new Error(msg);
+      }
+      return res;
+    }
+
+    async function loadSummary() {
+      const res = await api('/api/summary');
+      const data = await res.json();
+      dbPath.textContent = data.db;
+      const items = [
+        ['Games', data.counts.games],
+        ['Headers', data.counts.headers],
+        ['1600–1800', data.counts.both_1600_1800],
+        ['1800–2200', data.counts.both_1800_2200],
+        ['2200+', data.counts.both_2200_plus],
+      ];
+      summary.innerHTML = items.map(([label, value]) => `<div class="metric"><strong>${fmt(value)}</strong><span class="muted">${label}</span></div>`).join('');
+    }
+
+    async function runQuery(queryText = sql.value) {
+      error.hidden = true;
+      results.innerHTML = '';
+      rowCount.textContent = 'Running…';
+      try {
+        const res = await api('/api/query', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sql: queryText, limit: Number(limit.value || 200) })
+        });
+        const data = await res.json();
+        renderTable(data.columns, data.rows);
+        rowCount.textContent = `${fmt(data.row_count)} row${data.row_count === 1 ? '' : 's'} returned`;
+      } catch (e) {
+        error.textContent = e.message;
+        error.hidden = false;
+        rowCount.textContent = 'Query failed';
+      }
+    }
+
+    function renderTable(columns, rows) {
+      if (!columns.length) { results.innerHTML = ''; return; }
+      const head = `<thead><tr>${columns.map(c => `<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>`;
+      const body = rows.map(row => `<tr>${row.map((value, i) => cell(columns[i], value)).join('')}</tr>`).join('');
+      results.innerHTML = head + `<tbody>${body}</tbody>`;
+    }
+
+    function cell(column, value) {
+      if (column === 'game_id' && value !== null && value !== undefined) {
+        return `<td><button onclick="showPgn(${Number(value)})">${escapeHtml(value)}</button></td>`;
+      }
+      return `<td>${escapeHtml(value)}</td>`;
+    }
+
+    function escapeHtml(value) {
+      if (value === null || value === undefined) return '';
+      return String(value).replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
+    }
+
+    async function showPgn(gameId) {
+      pgnTitle.textContent = `PGN ${gameId}`;
+      pgnText.textContent = 'Loading…';
+      dialog.showModal();
+      try {
+        const res = await api(`/api/game/${gameId}/pgn`);
+        pgnText.textContent = await res.text();
+      } catch (e) {
+        pgnText.textContent = e.message;
+      }
+    }
+    window.showPgn = showPgn;
+
+    document.getElementById('run').addEventListener('click', () => runQuery());
+    document.getElementById('refreshSummary').addEventListener('click', loadSummary);
+    document.getElementById('closeDialog').addEventListener('click', () => dialog.close());
+    document.querySelectorAll('[data-preset]').forEach(button => {
+      button.addEventListener('click', async () => {
+        const name = button.dataset.preset;
+        const presets = {
+          'bse-1600-1800': `select game_id, white, black, result, white_elo, black_elo, date, source_archive\nfrom games\nwhere min_elo >= 1600 and max_elo < 1800\norder by game_id`,
+          'dev-1800-2200': `select game_id, white, black, result, white_elo, black_elo, date, source_archive\nfrom games\nwhere min_elo >= 1800 and max_elo <= 2200\norder by game_id`,
+          'planning-2200-plus': `select game_id, white, black, result, white_elo, black_elo, date, source_archive\nfrom games\nwhere min_elo >= 2200\norder by game_id`,
+          'archives': `select source_archive, count(*) as games\nfrom games\ngroup by source_archive\norder by source_archive`,
+          'headers': `select key, count(*) as n\nfrom game_headers\ngroup by key\norder by n desc, key`
+        };
+        sql.value = presets[name];
+        runQuery(sql.value);
+      });
+    });
+
+    loadSummary().catch(e => { dbPath.textContent = e.message; });
+  </script>
+</body>
+</html>

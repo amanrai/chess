@@ -15,6 +15,7 @@ Relevant work completed today:
 - added reusable eligible-game cache support for the BSE neighbor index builder;
 - fixed the 1M sampler so it does not materialize hundreds of millions of Python `(game_id, ply)` tuples;
 - added a full Lumbras OTB SQLite metadata-store builder with parallel archive processing;
+- added a small read-only web interface for querying the Lumbras SQLite metadata store;
 - created Scryer tickets for deferred final-run planning and the metadata store.
 
 Expected local untracked/non-source paths may include:
@@ -302,19 +303,72 @@ Type: Feature
 
 Documents full SQLite metadata store design, schema, indexes, shard/byte-offset behavior, and downstream usage.
 
-## Next immediate task
+## Lumbras metadata-store query interface
 
-The user asked to check in/push everything and keep this handoff updated before building a small interface to query the SQLite metadata store.
-
-After commit/push, next likely work:
+New files:
 
 ```text
-small SQLite query interface for Lumbras metadata store
+serve_lumbras_metadata_store.sh
+scripts/serve_lumbras_metadata_store.py
+tools/lumbras_metadata_store/index.html
 ```
 
-Likely useful features:
+Run command:
 
-- show DB summary counts;
-- run canned queries for Elo bands (`1600-1800`, `1800-2200`, `2200+`);
-- run arbitrary read-only SQL;
-- optionally fetch/display PGN text for selected `game_id` using `shard_path` + byte offsets.
+```bash
+./serve_lumbras_metadata_store.sh
+```
+
+Defaults:
+
+```text
+DB:   /700gpart/chess/data/catalog/lumbras_otb/lumbras_otb_catalog.sqlite
+Host: 0.0.0.0
+Port: 8770
+```
+
+Open:
+
+```text
+http://localhost:8770
+```
+
+Override examples:
+
+```bash
+LUMBRAS_METADATA_PORT=9001 ./serve_lumbras_metadata_store.sh
+LUMBRAS_METADATA_DB=/path/to/lumbras_otb_catalog.sqlite ./serve_lumbras_metadata_store.sh
+```
+
+Interface features:
+
+- summary counts for total games, total headers, `1600-1800`, `1800-2200`, and `2200+` bands;
+- canned queries for BSE/dev/planning bands, archives, and header keys;
+- arbitrary read-only SQL via `/api/query`;
+- blocks non-read-only SQL and multiple statements;
+- result table renders `game_id` as a button;
+- clicking a `game_id` fetches PGN directly from `shard_path` using `byte_start`/`byte_end`.
+
+Relevant API endpoints:
+
+```text
+GET  /api/health
+GET  /api/summary
+POST /api/query
+GET  /api/game/{game_id}/pgn
+GET  /api/presets/{name}
+```
+
+## Next immediate task
+
+Current likely next work is to use the metadata store/query UI while continuing toward Manifolder/z2. If the metadata catalog is not yet built, first run:
+
+```bash
+./build_lumbras_metadata_store.sh
+```
+
+For the 1M BSE neighbor index, run:
+
+```bash
+./build_bse_neighbor_index.sh
+```
