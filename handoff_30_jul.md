@@ -16,6 +16,8 @@ Relevant work completed today:
 - fixed the 1M sampler so it does not materialize hundreds of millions of Python `(game_id, ply)` tuples;
 - added a full Lumbras OTB SQLite metadata-store builder with parallel archive processing;
 - added a small read-only web interface for querying the Lumbras SQLite metadata store;
+- added a brute-force BSE neighbor-search benchmark script;
+- added a FAISS conversion script for the existing 1M BSE index vectors;
 - created Scryer tickets for deferred final-run planning and the metadata store.
 
 Expected local untracked/non-source paths may include:
@@ -359,9 +361,86 @@ GET  /api/game/{game_id}/pgn
 GET  /api/presets/{name}
 ```
 
+## BSE neighbor search benchmark and FAISS conversion
+
+Benchmark files:
+
+```text
+benchmark_bse_neighbor_search.sh
+scripts/benchmark_bse_neighbor_search.py
+```
+
+Run quick benchmark:
+
+```bash
+./benchmark_bse_neighbor_search.sh
+```
+
+Run all rows once:
+
+```bash
+BSE_SEARCH_QUERIES=0 ./benchmark_bse_neighbor_search.sh
+```
+
+Observed first brute-force attempt on the 1M index:
+
+```text
+rows: 1,000,000
+dims: 12,288
+vectors_raw.fp16.npy: 22.9 GiB
+vectors_norm.fp16.npy: 22.9 GiB
+device: NVIDIA RTX A4000
+chunk size: 4,096
+first query: ~51s/query
+```
+
+Conclusion: brute-force scanning over the 1M x 12,288 vectors is not viable for z2 pair construction. Need FAISS/ANN.
+
+FAISS conversion files:
+
+```text
+convert_bse_index_to_faiss.sh
+scripts/convert_bse_index_to_faiss.py
+```
+
+`pyproject.toml` now includes:
+
+```text
+faiss-cpu>=1.8
+```
+
+Run after `uv sync` if needed:
+
+```bash
+./convert_bse_index_to_faiss.sh
+```
+
+Defaults:
+
+```text
+index dir:    /700gpart/chess/data/analysis/bse_neighbors_1800_2200_1m
+metric:       both
+index type:   ivfpq
+nlist:        1024
+nprobe:       32
+pq_m:         96
+pq_nbits:     8
+train sample: 50,000
+add batch:    4,096
+```
+
+Outputs:
+
+```text
+faiss_cosine_ivfpq.index  # from vectors_norm.fp16.npy, inner product over normalized vectors
+faiss_l2_ivfpq.index      # from vectors_raw.fp16.npy, L2/RMS over raw vectors
+```
+
+Important: this does not rerun BSE encoding. It only consumes the already generated `.npy` vector files.
+
 ## Next immediate task
 
-Current likely next work is to use the metadata store/query UI while continuing toward Manifolder/z2. If the metadata catalog is not yet built, first run:
+Current likely next work is to use FAISS search to design/build the z2 paired trajectory dataset while continuing toward Manifolder/z2. If the metadata catalog is not yet built, first run:
 
 ```bash
 ./build_lumbras_metadata_store.sh
