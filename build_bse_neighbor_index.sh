@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build the 100k BSE nearest-neighbor index.
+# Build the 1M BSE nearest-neighbor index from 1800-2200 Elo games.
 #
 # Usage:
 #   ./build_bse_neighbor_index.sh path/to/games_1800_2200.pgn [more.pgn ...]
@@ -45,13 +45,14 @@ printf '  %s\n' "${PGNS[@]}"
 
 uv run python scripts/build_bse_neighbor_index.py \
   --pgn "${PGNS[@]}" \
-  --checkpoint checkpoints/board_state_q_probe_256d_48q/board_state_q_probe_volcanic-planet-22_epoch_001_batch_1350000.pt \
-  --out-dir data/analysis/bse_neighbors_1800_2200_100k \
-  --nonterminal-samples 90000 \
-  --terminal-samples 10000 \
+  --checkpoint "${BSE_NEIGHBOR_CHECKPOINT:-checkpoints/board_state_q_probe_256d_48q/board_state_q_probe_volcanic-planet-22_epoch_001_batch_1350000.pt}" \
+  --out-dir "${BSE_NEIGHBOR_OUT_DIR:-/700gpart/chess/data/analysis/bse_neighbors_1800_2200_1m}" \
+  --nonterminal-samples "${BSE_NEIGHBOR_NONTERMINAL_SAMPLES:-900000}" \
+  --terminal-samples "${BSE_NEIGHBOR_TERMINAL_SAMPLES:-100000}" \
+  --eligible-games-dir "${BSE_NEIGHBOR_ELIGIBLE_GAMES_DIR:-/700gpart/chess/data/processed/lumbras/bse_neighbors_1800_2200_eligible_games}" \
   --min-elo 1800 \
   --max-elo 2200 \
   --bucket-plies 5 \
-  --batch-size "${BSE_NEIGHBOR_BATCH_SIZE:-16}" \
-  --max-games "${BSE_NEIGHBOR_MAX_GAMES:-100000}" \
+  --batch-size "${BSE_NEIGHBOR_BATCH_SIZE:-32}" \
+  --max-games "${BSE_NEIGHBOR_MAX_GAMES:-0}" \
   --device "${BSE_NEIGHBOR_DEVICE:-cuda}"

@@ -52,6 +52,7 @@ from train_board_state_q_probe import QBoardStateProbeTransformer
 
 DEFAULT_OUT_DIR = ROOT / "data" / "analysis" / "bse_neighbors_1800_2200_100k"
 METADATA_DTYPE = np.dtype([("game_id", "<i8"), ("ply", "<i4"), ("is_terminal", "?")])
+ELIGIBLE_GAME_FILES = ("moves.npy", "offsets.npy", "pgn_texts.jsonl", "game_headers.jsonl", "manifest.json")
 
 
 def iter_pgn_games(path: Path) -> Iterable[str]:
@@ -186,6 +187,65 @@ def read_eligible_games(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarra
     return np.concatenate(moves_chunks, axis=0), np.asarray(offsets, dtype=np.int64), pgn_texts, headers_list
 
 
+def eligible_games_cache_exists(path: Path) -> bool:
+    return all((path / name).is_file() for name in ELIGIBLE_GAME_FILES)
+
+
+def load_eligible_games_cache(path: Path) -> tuple[np.ndarray, np.ndarray, list[str], list[dict[str, str]]]:
+    print(f"loading eligible games cache from {path}")
+    moves = np.load(path / "moves.npy", mmap_mode="r")
+    offsets = np.load(path / "offsets.npy", mmap_mode="r")
+    pgn_texts: list[str] = []
+    with (path / "pgn_texts.jsonl").open("r", encoding="utf-8") as handle:
+        for line in handle:
+            row = json.loads(line)
+            pgn_texts.append(row["pgn"])
+    headers: list[dict[str, str]] = []
+    with (path / "game_headers.jsonl").open("r", encoding="utf-8") as handle:
+        for line in handle:
+            row = json.loads(line)
+            headers.append(row["headers"])
+    print(f"loaded {len(pgn_texts):,} eligible games; total plies={len(moves):,}")
+    return moves, offsets, pgn_texts, headers
+
+
+def write_eligible_games_cache(
+    path: Path,
+    moves: np.ndarray,
+    offsets: np.ndarray,
+    pgn_texts: list[str],
+    headers: list[dict[str, str]],
+    args: argparse.Namespace,
+) -> None:
+    print(f"writing eligible games cache to {path}")
+    path.mkdir(parents=True, exist_ok=True)
+    np.save(path / "moves.npy", moves)
+    np.save(path / "offsets.npy", offsets)
+    with (path / "pgn_texts.jsonl").open("w", encoding="utf-8") as handle:
+        for game_id, pgn in enumerate(pgn_texts):
+            handle.write(json.dumps({"game_id": game_id, "pgn": pgn}) + "\n")
+    with (path / "game_headers.jsonl").open("w", encoding="utf-8") as handle:
+        for game_id, h in enumerate(headers):
+            handle.write(json.dumps({"game_id": game_id, "headers": h}) + "\n")
+    manifest = {
+        "kind": "bse_neighbor_eligible_games_cache_v1",
+        "pgn": [str(path) for path in args.pgn],
+        "min_elo": args.min_elo,
+        "max_elo": args.max_elo,
+        "seq_len": args.seq_len,
+        "max_games": args.max_games,
+        "num_games": len(pgn_texts),
+        "total_plies": int(len(moves)),
+    }
+    (path / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+
+def ensure_games_link(games_dir: Path, target: Path) -> None:
+    if games_dir.exists() or games_dir.is_symlink():
+        return
+    games_dir.symlink_to(target.resolve(), target_is_directory=True)
+
+
 def sample_equal_from_buckets(
     buckets: dict[int, list[tuple[int, int]]], total: int, rng: random.Random
 ) -> list[tuple[int, int]]:
@@ -216,24 +276,110 @@ def sample_equal_from_buckets(
     return selected[:total]
 
 
-def build_samples(offsets: np.ndarray, nonterminal: int, terminal: int, bucket_plies: int, seed: int) -> np.ndarray:
-    rng = random.Random(seed)
-    nonterminal_buckets: dict[int, list[tuple[int, int]]] = defaultdict(list)
-    terminal_buckets: dict[int, list[tuple[int, int]]] = defaultdict(list)
-    for game_id in range(len(offsets) - 1):
-        length = int(offsets[game_id + 1] - offsets[game_id])
-        for ply in range(1, length):
-            nonterminal_buckets[(ply - 1) // bucket_plies].append((game_id, ply))
-        terminal_buckets[(length - 1) // bucket_plies].append((game_id, length))
+def allocate_equal(capacities: dict[int, int], total: int) -> dict[int, int]:
+    keys = sorted(k for k, cap in capacities.items() if cap > 0)
+    if not keys or total <= 0:
+        return {}
+    want: dict[int, int] = {}
+    base = total // len(keys)
+    remainder = total % len(keys)
+    for i, key in enumerate(keys):
+        want[key] = min(capacities[key], base + (1 if i < remainder else 0))
 
-    nonterm = sample_equal_from_buckets(nonterminal_buckets, nonterminal, rng)
-    term = sample_equal_from_buckets(terminal_buckets, terminal, rng)
-    rows = np.empty(len(nonterm) + len(term), dtype=METADATA_DTYPE)
-    for i, (game_id, ply) in enumerate(nonterm):
-        rows[i] = (game_id, ply, False)
-    for j, (game_id, ply) in enumerate(term, start=len(nonterm)):
-        rows[j] = (game_id, ply, True)
-    rng.shuffle(rows)
+    remaining = total - sum(want.values())
+    while remaining > 0:
+        open_keys = [key for key in keys if want[key] < capacities[key]]
+        if not open_keys:
+            break
+        per_key = max(1, math.ceil(remaining / len(open_keys)))
+        for key in open_keys:
+            add = min(per_key, capacities[key] - want[key], remaining)
+            want[key] += add
+            remaining -= add
+            if remaining <= 0:
+                break
+    return want
+
+
+def build_samples(offsets: np.ndarray, nonterminal: int, terminal: int, bucket_plies: int, seed: int) -> np.ndarray:
+    """Sample positions without materializing every legal (game, ply) pair.
+
+    The full 1800-2200 cache has hundreds of millions of non-terminal plies, so
+    the old list-of-tuples bucket construction could appear to hang or exhaust
+    memory before encoding began. This version samples by bucket from vectorized
+    per-game counts and only materializes the requested metadata rows.
+    """
+    rng = random.Random(seed)
+    np_rng = np.random.default_rng(seed)
+    lengths = np.diff(offsets).astype(np.int64, copy=False)
+    game_ids = np.arange(len(lengths), dtype=np.int64)
+
+    nonterminal_capacities: dict[int, int] = {}
+    max_len = int(lengths.max(initial=0))
+    max_nonterminal_bucket = (max(0, max_len - 2) // bucket_plies) if max_len >= 2 else -1
+    for bucket in range(max_nonterminal_bucket + 1):
+        ply_lo = bucket * bucket_plies + 1
+        ply_hi = (bucket + 1) * bucket_plies
+        counts = np.maximum(np.minimum(lengths - 1, ply_hi) - ply_lo + 1, 0)
+        total_count = int(counts.sum())
+        if total_count > 0:
+            nonterminal_capacities[bucket] = total_count
+
+    terminal_bucket_ids = ((lengths - 1) // bucket_plies).astype(np.int64, copy=False)
+    terminal_capacities = {
+        int(bucket): int(count)
+        for bucket, count in zip(*np.unique(terminal_bucket_ids, return_counts=True), strict=False)
+        if int(count) > 0
+    }
+
+    nonterminal_wants = allocate_equal(nonterminal_capacities, nonterminal)
+    terminal_wants = allocate_equal(terminal_capacities, terminal)
+    total_rows = sum(nonterminal_wants.values()) + sum(terminal_wants.values())
+    rows = np.empty(total_rows, dtype=METADATA_DTYPE)
+    out_i = 0
+
+    for bucket, want in sorted(nonterminal_wants.items()):
+        if want <= 0:
+            continue
+        ply_lo = bucket * bucket_plies + 1
+        ply_hi = (bucket + 1) * bucket_plies
+        counts = np.maximum(np.minimum(lengths - 1, ply_hi) - ply_lo + 1, 0).astype(np.int64, copy=False)
+        nonzero = counts > 0
+        bucket_game_ids = game_ids[nonzero]
+        bucket_counts = counts[nonzero]
+        cumulative = np.cumsum(bucket_counts)
+        total_count = int(cumulative[-1])
+        ranks = np.asarray(rng.sample(range(total_count), min(want, total_count)), dtype=np.int64)
+        ranks.sort()
+        bucket_idx = np.searchsorted(cumulative, ranks, side="right")
+        prev = np.zeros_like(ranks)
+        mask = bucket_idx > 0
+        prev[mask] = cumulative[bucket_idx[mask] - 1]
+        sampled_game_ids = bucket_game_ids[bucket_idx]
+        sampled_plies = ply_lo + (ranks - prev)
+        n = len(sampled_game_ids)
+        rows[out_i : out_i + n]["game_id"] = sampled_game_ids
+        rows[out_i : out_i + n]["ply"] = sampled_plies.astype(np.int32, copy=False)
+        rows[out_i : out_i + n]["is_terminal"] = False
+        out_i += n
+
+    for bucket, want in sorted(terminal_wants.items()):
+        if want <= 0:
+            continue
+        candidates = game_ids[terminal_bucket_ids == bucket]
+        picked = np_rng.choice(candidates, size=min(want, len(candidates)), replace=False).astype(np.int64, copy=False)
+        n = len(picked)
+        rows[out_i : out_i + n]["game_id"] = picked
+        rows[out_i : out_i + n]["ply"] = lengths[picked].astype(np.int32, copy=False)
+        rows[out_i : out_i + n]["is_terminal"] = True
+        out_i += n
+
+    rows = rows[:out_i]
+    np_rng.shuffle(rows)
+    print(
+        f"sampled {len(rows):,} positions "
+        f"({sum(nonterminal_wants.values()):,} nonterminal, {sum(terminal_wants.values()):,} terminal)"
+    )
     return rows
 
 
@@ -295,12 +441,17 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--seed", type=int, default=20260728)
     parser.add_argument("--max-games", type=int, default=0, help="Debug cap on eligible games; 0 keeps all")
+    parser.add_argument(
+        "--eligible-games-dir",
+        type=Path,
+        default=None,
+        help="Reusable cache dir for tokenized eligible games; loaded when complete, otherwise created",
+    )
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     games_dir = args.out_dir / "games"
-    games_dir.mkdir(parents=True, exist_ok=True)
 
     checkpoint = resolve_checkpoint(args.checkpoint)
     print(f"BSE checkpoint: {checkpoint}")
@@ -309,15 +460,15 @@ def main() -> int:
     context_plies = int(ckpt_args.get("context_plies", 128))
     pad_id = int(ckpt_args.get("pad_id", 0))
 
-    moves, offsets, pgn_texts, headers = read_eligible_games(args)
-    np.save(games_dir / "moves.npy", moves)
-    np.save(games_dir / "offsets.npy", offsets)
-    with (games_dir / "pgn_texts.jsonl").open("w", encoding="utf-8") as handle:
-        for game_id, pgn in enumerate(pgn_texts):
-            handle.write(json.dumps({"game_id": game_id, "pgn": pgn}) + "\n")
-    with (games_dir / "game_headers.jsonl").open("w", encoding="utf-8") as handle:
-        for game_id, h in enumerate(headers):
-            handle.write(json.dumps({"game_id": game_id, "headers": h}) + "\n")
+    if args.eligible_games_dir is not None and eligible_games_cache_exists(args.eligible_games_dir):
+        moves, offsets, pgn_texts, headers = load_eligible_games_cache(args.eligible_games_dir)
+        ensure_games_link(games_dir, args.eligible_games_dir)
+    else:
+        moves, offsets, pgn_texts, headers = read_eligible_games(args)
+        cache_dir = args.eligible_games_dir if args.eligible_games_dir is not None else games_dir
+        write_eligible_games_cache(cache_dir, moves, offsets, pgn_texts, headers, args)
+        if cache_dir != games_dir:
+            ensure_games_link(games_dir, cache_dir)
 
     metadata = build_samples(offsets, args.nonterminal_samples, args.terminal_samples, args.bucket_plies, args.seed)
     np.save(args.out_dir / "metadata.npy", metadata)
@@ -330,6 +481,9 @@ def main() -> int:
         "nonterminal_samples": args.nonterminal_samples,
         "terminal_samples": args.terminal_samples,
         "bucket_plies": args.bucket_plies,
+        "eligible_games_dir": str(args.eligible_games_dir) if args.eligible_games_dir is not None else str(games_dir),
+        "num_games": int(len(offsets) - 1),
+        "total_plies": int(len(moves)),
         "num_positions": int(len(metadata)),
         "bank_shape": [int(model.encoder.num_queries), int(model.encoder.model_dim)],
         "flat_dim": int(model.encoder.num_queries * model.encoder.model_dim),
